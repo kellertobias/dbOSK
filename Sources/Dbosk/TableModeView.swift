@@ -23,6 +23,27 @@ struct TableModeView: View {
                     version: browser.resultTab.resultVersion)
                 statusBar
             }
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Spacer()
+                    ExportMenu(tab: browser.resultTab)
+                    if browser.resultTab.runState == .running
+                        || browser.resultTab.runState == .streaming {
+                        Button {
+                            browser.resultTab.stop()
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                        }
+                    } else {
+                        Button {
+                            browser.load()
+                        } label: {
+                            Label("Load", systemImage: "play.fill")
+                        }
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                }
+            }
         }
     }
 
@@ -96,11 +117,6 @@ struct TableModeView: View {
                 }
                 .help("Next page")
                 Spacer()
-                ExportMenu(tab: browser.resultTab)
-                Button("Load") {
-                    browser.load()
-                }
-                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(10)
