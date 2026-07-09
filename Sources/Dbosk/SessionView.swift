@@ -18,22 +18,9 @@ struct SessionView: View {
                     .navigationSplitViewColumnWidth(min: 180, ideal: 240)
             } detail: {
                 VStack(spacing: 0) {
-                    Picker("Mode", selection: $session.detailMode) {
-                        ForEach(ConnectionSession.DetailMode.allCases, id: \.self) {
-                            Text($0.rawValue).tag($0)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: 220)
-                    .padding(.vertical, 6)
+                    TabBarView(session: session)
                     Divider()
-                    switch session.detailMode {
-                    case .query:
-                        QueryView(tab: session.queryTab)
-                    case .table:
-                        TableModeView(browser: session.tableBrowser)
-                    }
+                    tabContent
                 }
             }
         }
@@ -60,10 +47,88 @@ struct SessionView: View {
         }
         .task { await session.loadRoot() }
     }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        if let tab = session.selectedTab {
+            switch tab.content {
+            case .query(let queryTab):
+                QueryView(tab: queryTab)
+            case .table(let browser):
+                TableModeView(browser: browser)
+            }
+        } else {
+            ContentUnavailableView(
+                "No Tab Open",
+                systemImage: "tablecells",
+                description: Text(
+                    "Click a table in the sidebar, or the SQL button on a schema."))
+        }
+    }
 }
+
+// MARK: - Tab bar
+
+struct TabBarView: View {
+    @Bindable var session: ConnectionSession
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(session.tabs) { tab in
+                        tabButton(tab)
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+            Button {
+                session.openQueryTab()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("New query tab")
+            .padding(.trailing, 6)
+        }
+        .frame(height: 30)
+        .background(.bar)
+    }
+
+    private func tabButton(_ tab: WorkTab) -> some View {
+        let isSelected = session.selectedTabID == tab.id
+        return HStack(spacing: 4) {
+            Image(systemName: tab.systemImage)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Text(tab.title)
+                .font(.callout)
+                .lineLimit(1)
+            Button {
+                session.close(tab)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Close tab")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isSelected ? Color.accentColor.opacity(0.18) : .clear))
+        .contentShape(Rectangle())
+        .onTapGesture { session.selectedTabID = tab.id }
+    }
+}
+
+// MARK: - Sidebar
 
 struct SidebarView: View {
     @Bindable var session: ConnectionSession
+    @State private var hoveredNodeID: DBCore.Namespace.ID?
 
     var body: some View {
         List {
@@ -74,18 +139,50 @@ struct SidebarView: View {
                 session.rootNamespaces.map { NamespaceNode(namespace: $0, session: session) },
                 children: \.children
             ) { node in
-                Label(node.namespace.name, systemImage: node.icon)
-                    .onTapGesture(count: 2) {
-                        guard case .table = node.namespace.kind else { return }
-                        session.detailMode = .query
-                        session.queryTab.queryText = node.defaultQuery
-                        session.queryTab.run()
-                    }
-                    .onTapGesture(count: 1) {
-                        guard case .table = node.namespace.kind else { return }
-                        session.detailMode = .table
-                        session.selectTable(node.namespace)
-                    }
+                row(for: node)
+            }
+        }
+    }
+
+    private func row(for node: NamespaceNode) -> some View {
+        HStack {
+            Label(node.namespace.name, systemImage: node.icon)
+            Spacer()
+            // Raw-query shortcut on database/schema nodes.
+            if node.namespace.isExpandable, hoveredNodeID == node.id {
+                Button {
+                    session.openQueryTab()
+                } label: {
+                    Text("SQL")
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.accentColor.opacity(0.2)))
+                }
+                .buttonStyle(.borderless)
+                .help("New query on \(node.namespace.name)")
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredNodeID = hovering ? node.id : nil
+        }
+        .onTapGesture {
+            if case .table = node.namespace.kind {
+                session.openTable(node.namespace)
+            }
+        }
+        .contextMenu {
+            if case .table = node.namespace.kind {
+                Button("Open Table") { session.openTable(node.namespace) }
+                Button("Query Table") {
+                    session.openQueryTab(
+                        initialSQL: node.defaultQuery, runImmediately: true)
+                }
+            } else {
+                Button("New Query") { session.openQueryTab() }
             }
         }
     }
@@ -124,6 +221,8 @@ struct NamespaceNode: @MainActor Identifiable {
         return "SELECT * FROM \(path) LIMIT 100;"
     }
 }
+
+// MARK: - Query view
 
 struct QueryView: View {
     @Bindable var tab: QueryTab

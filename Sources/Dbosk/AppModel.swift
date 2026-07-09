@@ -94,30 +94,59 @@ final class ConnectionSession: Identifiable {
     let profile: ConnectionProfile
     let driver: any DatabaseDriver
 
-    enum DetailMode: String, CaseIterable {
-        case query = "Query"
-        case table = "Table"
-    }
-
     var rootNamespaces: [Namespace] = []
     var children: [Namespace.ID: [Namespace]] = [:]
     var sidebarError: String?
-    var queryTab: QueryTab
-    var detailMode: DetailMode = .query
-    var tableBrowser: TableBrowser
+    var tabs: [WorkTab] = []
+    var selectedTabID: WorkTab.ID?
+
+    var selectedTab: WorkTab? {
+        tabs.first { $0.id == selectedTabID }
+    }
 
     init(profile: ConnectionProfile, driver: any DatabaseDriver) {
         self.profile = profile
         self.driver = driver
-        self.queryTab = QueryTab(driver: driver)
-        self.tableBrowser = TableBrowser(driver: driver)
     }
 
-    /// Sidebar selection: in Table mode it targets the browser; in Query mode
-    /// double-click inserts a query (handled in the view).
-    func selectTable(_ namespace: Namespace) {
+    /// Opens (or re-focuses) a table tab. Clicking a table always lands in
+    /// Table mode; a tab already showing that table is reused.
+    func openTable(_ namespace: Namespace) {
         guard case .table = namespace.kind else { return }
-        tableBrowser.select(namespace)
+        if let existing = tabs.first(where: {
+            if case .table(let browser) = $0.content {
+                return browser.table?.path == namespace.path
+            }
+            return false
+        }) {
+            selectedTabID = existing.id
+            return
+        }
+        let browser = TableBrowser(driver: driver)
+        let tab = WorkTab(title: namespace.name, content: .table(browser))
+        tabs.append(tab)
+        selectedTabID = tab.id
+        browser.select(namespace)
+    }
+
+    /// Opens a new raw-query tab, optionally prefilled and executed.
+    func openQueryTab(initialSQL: String = "", runImmediately: Bool = false) {
+        let queryTab = QueryTab(driver: driver)
+        queryTab.queryText = initialSQL
+        let tab = WorkTab(title: "Query", content: .query(queryTab))
+        tabs.append(tab)
+        selectedTabID = tab.id
+        if runImmediately { queryTab.run() }
+    }
+
+    func close(_ tab: WorkTab) {
+        if case .query(let queryTab) = tab.content { queryTab.stop() }
+        if case .table(let browser) = tab.content { browser.resultTab.stop() }
+        guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        tabs.remove(at: index)
+        if selectedTabID == tab.id {
+            selectedTabID = tabs[safe: min(index, tabs.count - 1)]?.id
+        }
     }
 
     func loadRoot() async {
@@ -212,6 +241,40 @@ final class QueryTab {
 
 extension DBError.Kind: Equatable {}
 
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+// MARK: - Work tabs
+
+/// One open tab in a session: either a raw-query editor or a table browser.
+@Observable
+@MainActor
+final class WorkTab: Identifiable {
+    enum Content {
+        case query(QueryTab)
+        case table(TableBrowser)
+    }
+
+    let id = UUID()
+    var title: String
+    let content: Content
+
+    init(title: String, content: Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var systemImage: String {
+        switch content {
+        case .query: return "terminal"
+        case .table: return "tablecells"
+        }
+    }
+}
+
 // MARK: - Table browser (Full Table mode)
 
 @Observable
@@ -225,6 +288,7 @@ final class TableBrowser {
     var offset = 0
     var limit = 100
     var columnsError: String?
+    var isLoadingColumns = false
 
     /// Executes the built query; reuses the streaming runner.
     let resultTab: QueryTab
@@ -244,13 +308,17 @@ final class TableBrowser {
         whereClause = ""
         offset = 0
         columnsError = nil
+        isLoadingColumns = true
+        // Kick off the first page immediately; columns load in parallel so the
+        // user sees data as fast as the server can deliver it.
+        load()
         Task {
             do {
                 availableColumns = try await driver.listColumns(of: namespace)
             } catch {
                 columnsError = String(describing: error)
             }
-            load()
+            isLoadingColumns = false
         }
     }
 

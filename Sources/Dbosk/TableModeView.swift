@@ -32,7 +32,11 @@ struct TableModeView: View {
                       systemImage: "tablecells")
                     .font(.headline)
                 Spacer()
+                if browser.isLoadingColumns {
+                    ProgressView().controlSize(.small)
+                }
                 columnsMenu
+                    .disabled(browser.isLoadingColumns)
             }
             HStack {
                 Text("WHERE").font(.caption).foregroundStyle(.secondary)
