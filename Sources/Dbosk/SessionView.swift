@@ -31,14 +31,6 @@ struct SessionView: View {
         .navigationTitle(session.profile.name)
         .navigationSubtitle(session.profile.groupName ?? "")
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    appModel.disconnect(profileID: session.profile.id)
-                    dismiss()
-                } label: {
-                    Label("Disconnect", systemImage: "xmark.circle")
-                }
-            }
             if let label = appModel.label(for: session.profile) {
                 ToolbarItem(placement: .primaryAction) {
                     LabelBadge(label: label)
@@ -46,6 +38,8 @@ struct SessionView: View {
             }
         }
         .task { await session.loadRoot() }
+        // Closing the window ends the session — no separate disconnect control.
+        .onDisappear { appModel.disconnect(profileID: session.profile.id) }
     }
 
     @ViewBuilder
@@ -193,6 +187,7 @@ struct SidebarView: View {
                         .help("Choose which tables to show")
                     }
                 }
+                .padding(.trailing, 12)
             }
         }
         .sheet(item: $noteTarget) { namespace in
