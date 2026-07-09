@@ -185,6 +185,8 @@ final class ConnectionSession: Identifiable {
     var metadata: ConnectionMetadata
     /// Transient sidebar toggle to reveal hidden tables.
     var showHiddenTables = false
+    /// Sidebar visibility edit mode: shows checkboxes on tables/groups.
+    var editingVisibility = false
     private let metadataStore = MetadataStore()
 
     var selectedTab: WorkTab? {
@@ -243,19 +245,35 @@ final class ConnectionSession: Identifiable {
         persistMetadata()
     }
 
-    /// "Only show this table": hides every sibling table except `namespace`.
-    func hideOthers(than namespace: Namespace, in parent: Namespace) {
-        for sibling in children[parent.id] ?? [] {
-            guard case .table = sibling.kind else { continue }
-            metadata.update(sibling.path) { $0.hidden = sibling.path != namespace.path }
-        }
-        persistMetadata()
-    }
-
     func unhideAll(in parent: Namespace) {
         for sibling in children[parent.id] ?? [] {
             guard case .table = sibling.kind else { continue }
             metadata.update(sibling.path) { $0.hidden = false }
+        }
+        persistMetadata()
+    }
+
+    /// Tables of a parent, ignoring visibility (for the edit-mode checklist).
+    func allTables(in parent: Namespace) -> [Namespace] {
+        (children[parent.id] ?? []).filter(\.kind.isTable)
+    }
+
+    /// Sets visibility for every loaded table across all expanded parents.
+    func setAllTablesVisible(_ visible: Bool) {
+        for siblings in children.values {
+            for namespace in siblings where namespace.kind.isTable {
+                metadata.update(namespace.path) { $0.hidden = !visible }
+            }
+        }
+        persistMetadata()
+    }
+
+    /// Sets visibility for all tables of `parent` belonging to `group`
+    /// (nil group = ungrouped tables).
+    func setGroupVisible(_ visible: Bool, group: String?, in parent: Namespace) {
+        for namespace in allTables(in: parent)
+        where self.group(for: namespace) == group {
+            metadata.update(namespace.path) { $0.hidden = !visible }
         }
         persistMetadata()
     }

@@ -40,7 +40,7 @@ struct SessionView: View {
                 }
             }
             if let label = appModel.label(for: session.profile) {
-                ToolbarItem(placement: .status) {
+                ToolbarItem(placement: .primaryAction) {
                     LabelBadge(label: label)
                 }
             }
@@ -155,20 +155,42 @@ struct SidebarView: View {
                     row(for: node)
                 }
             } header: {
-                HStack {
+                HStack(spacing: 8) {
                     Text(session.profile.database ?? "Objects")
                     Spacer()
-                    if !session.metadata.tables.filter(\.value.hidden).isEmpty {
+                    if session.editingVisibility {
+                        Button("All") { session.setAllTablesVisible(true) }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .help("Select all tables")
+                        Button("None") { session.setAllTablesVisible(false) }
+                            .buttonStyle(.borderless)
+                            .font(.caption)
+                            .help("Deselect all tables")
+                        Button("Done") { session.editingVisibility = false }
+                            .buttonStyle(.borderless)
+                            .font(.caption.weight(.semibold))
+                    } else {
+                        if !session.metadata.tables.filter(\.value.hidden).isEmpty {
+                            Button {
+                                session.showHiddenTables.toggle()
+                            } label: {
+                                Image(systemName: session.showHiddenTables
+                                    ? "eye" : "eye.slash")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help(session.showHiddenTables
+                                ? "Showing hidden tables" : "Show hidden tables")
+                        }
                         Button {
-                            session.showHiddenTables.toggle()
+                            session.editingVisibility = true
                         } label: {
-                            Image(systemName: session.showHiddenTables
-                                ? "eye" : "eye.slash")
+                            Image(systemName: "checklist")
                                 .font(.caption)
                         }
                         .buttonStyle(.borderless)
-                        .help(session.showHiddenTables
-                            ? "Showing hidden tables" : "Show hidden tables")
+                        .help("Choose which tables to show")
                     }
                 }
             }
@@ -219,12 +241,35 @@ struct SidebarView: View {
     @ViewBuilder
     private func row(for node: SidebarNode) -> some View {
         switch node.kind {
-        case .group(let name, _):
-            Label(name, systemImage: "folder.fill")
-                .foregroundStyle(.secondary)
+        case .group(let name, let parent):
+            HStack(spacing: 4) {
+                if session.editingVisibility {
+                    groupCheckbox(name: name, parent: parent)
+                }
+                Label(name, systemImage: "folder.fill")
+                    .foregroundStyle(.secondary)
+            }
         case .namespace(let namespace, let parent):
             namespaceRow(namespace, parent: parent, nodeID: node.id)
         }
+    }
+
+    /// Checkbox for a whole group: checked / unchecked / mixed.
+    private func groupCheckbox(name: String, parent: DBCore.Namespace) -> some View {
+        let tables = session.allTables(in: parent)
+            .filter { session.group(for: $0) == name }
+        let visibleCount = tables.filter { !session.isHidden($0) }.count
+        let symbol = visibleCount == tables.count
+            ? "checkmark.square.fill"
+            : (visibleCount == 0 ? "square" : "minus.square.fill")
+        return Button {
+            session.setGroupVisible(visibleCount != tables.count, group: name, in: parent)
+        } label: {
+            Image(systemName: symbol)
+                .foregroundStyle(visibleCount == 0 ? .secondary : Color.accentColor)
+        }
+        .buttonStyle(.borderless)
+        .help("Show or hide all tables in \(name)")
     }
 
     private func namespaceRow(
@@ -233,6 +278,10 @@ struct SidebarView: View {
         let isHidden = session.isHidden(namespace)
         let note = session.note(for: namespace)
         return HStack(spacing: 4) {
+            if session.editingVisibility, namespace.kind.isTable {
+                Image(systemName: isHidden ? "square" : "checkmark.square.fill")
+                    .foregroundStyle(isHidden ? .secondary : Color.accentColor)
+            }
             Label(namespace.name, systemImage: SidebarNode.icon(for: namespace))
                 .foregroundStyle(isHidden ? .tertiary : .primary)
             if note != nil {
@@ -247,7 +296,8 @@ struct SidebarView: View {
             }
             Spacer()
             // Raw-query shortcut on database/schema nodes.
-            if namespace.isExpandable, hoveredNodeID == nodeID {
+            if namespace.isExpandable, hoveredNodeID == nodeID,
+               !session.editingVisibility {
                 Button {
                     session.openQueryTab()
                 } label: {
@@ -269,7 +319,10 @@ struct SidebarView: View {
             hoveredNodeID = hovering ? nodeID : nil
         }
         .onTapGesture {
-            if case .table = namespace.kind {
+            guard case .table = namespace.kind else { return }
+            if session.editingVisibility {
+                session.setHidden(!isHidden, for: namespace)
+            } else {
                 session.openTable(namespace)
             }
         }
@@ -319,10 +372,8 @@ struct SidebarView: View {
         Button(session.isHidden(namespace) ? "Unhide Table" : "Hide Table") {
             session.setHidden(!session.isHidden(namespace), for: namespace)
         }
+        Button("Choose Visible Tables…") { session.editingVisibility = true }
         if let parent {
-            Button("Only Show This Table") {
-                session.hideOthers(than: namespace, in: parent)
-            }
             Button("Show All Tables") { session.unhideAll(in: parent) }
         }
     }
@@ -377,7 +428,10 @@ struct SidebarNode: @MainActor Identifiable {
     private func visibleTables(of parent: DBCore.Namespace) -> [DBCore.Namespace] {
         (session.children[parent.id] ?? [])
             .filter(\.kind.isTable)
-            .filter { session.showHiddenTables || !session.isHidden($0) }
+            .filter {
+                session.editingVisibility || session.showHiddenTables
+                    || !session.isHidden($0)
+            }
     }
 
     static func icon(for namespace: DBCore.Namespace) -> String {
