@@ -212,6 +212,9 @@ public protocol DatabaseDriver: Sendable {
     /// Lists children of `parent` (nil = root). Lazy: called as tree nodes expand.
     func listNamespaces(parent: Namespace?) async throws -> [Namespace]
 
+    /// Lists the columns of a table/collection without running a query.
+    func listColumns(of table: Namespace) async throws -> [ColumnMeta]
+
     /// Executes a query, streaming results in `pageSize`-bounded chunks.
     /// Implementations must honor Task cancellation and perform a driver-level
     /// cancel (server-side where supported) via `QueryExecution.cancel`.

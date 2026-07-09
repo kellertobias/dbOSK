@@ -139,6 +139,11 @@ struct PostgresDriverIntegrationTests {
         #expect(publicSchema != nil)
 
         let tables = try await driver.listNamespaces(parent: publicSchema)
-        #expect(tables.contains { $0.name == "dbosk_smoke" })
+        let smoke = tables.first { $0.name == "dbosk_smoke" }
+        #expect(smoke != nil)
+
+        let columns = try await driver.listColumns(of: smoke!)
+        #expect(columns.map(\.name) == ["id", "note"])
+        #expect(columns[0].dbTypeName == "integer")
     }
 }

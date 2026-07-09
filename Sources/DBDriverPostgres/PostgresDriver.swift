@@ -65,6 +65,24 @@ public final class PostgresDriver: DatabaseDriver, Sendable {
         }
     }
 
+    public func listColumns(of table: Namespace) async throws -> [ColumnMeta] {
+        guard table.path.count == 2 else { return [] }
+        let schema = table.path[0]
+        let name = table.path[1]
+        let rows = try await state.collect(
+            """
+            SELECT column_name, data_type FROM information_schema.columns
+            WHERE table_schema = \(schema) AND table_name = \(name)
+            ORDER BY ordinal_position
+            """)
+        return rows.compactMap { row in
+            guard case .string(let column) = row.first,
+                  case .string(let type) = row.dropFirst().first
+            else { return nil }
+            return ColumnMeta(name: column, dbTypeName: type)
+        }
+    }
+
     public func execute(_ query: DriverQuery, pageSize: Int) async throws -> QueryExecution {
         guard case .sql(let sql) = query else {
             throw DBError(kind: .unsupported, message: "PostgreSQL driver only accepts SQL")

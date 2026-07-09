@@ -94,15 +94,30 @@ final class ConnectionSession: Identifiable {
     let profile: ConnectionProfile
     let driver: any DatabaseDriver
 
+    enum DetailMode: String, CaseIterable {
+        case query = "Query"
+        case table = "Table"
+    }
+
     var rootNamespaces: [Namespace] = []
     var children: [Namespace.ID: [Namespace]] = [:]
     var sidebarError: String?
     var queryTab: QueryTab
+    var detailMode: DetailMode = .query
+    var tableBrowser: TableBrowser
 
     init(profile: ConnectionProfile, driver: any DatabaseDriver) {
         self.profile = profile
         self.driver = driver
         self.queryTab = QueryTab(driver: driver)
+        self.tableBrowser = TableBrowser(driver: driver)
+    }
+
+    /// Sidebar selection: in Table mode it targets the browser; in Query mode
+    /// double-click inserts a query (handled in the view).
+    func selectTable(_ namespace: Namespace) {
+        guard case .table = namespace.kind else { return }
+        tableBrowser.select(namespace)
     }
 
     func loadRoot() async {
@@ -196,3 +211,97 @@ final class QueryTab {
 }
 
 extension DBError.Kind: Equatable {}
+
+// MARK: - Table browser (Full Table mode)
+
+@Observable
+@MainActor
+final class TableBrowser {
+    var table: Namespace?
+    var availableColumns: [ColumnMeta] = []
+    /// Selected column names; empty = all columns.
+    var selectedColumns: Set<String> = []
+    var whereClause = ""
+    var offset = 0
+    var limit = 100
+    var columnsError: String?
+
+    /// Executes the built query; reuses the streaming runner.
+    let resultTab: QueryTab
+
+    private let driver: any DatabaseDriver
+
+    init(driver: any DatabaseDriver) {
+        self.driver = driver
+        self.resultTab = QueryTab(driver: driver)
+    }
+
+    func select(_ namespace: Namespace) {
+        guard namespace != table else { return }
+        table = namespace
+        availableColumns = []
+        selectedColumns = []
+        whereClause = ""
+        offset = 0
+        columnsError = nil
+        Task {
+            do {
+                availableColumns = try await driver.listColumns(of: namespace)
+            } catch {
+                columnsError = String(describing: error)
+            }
+            load()
+        }
+    }
+
+    func toggleColumn(_ name: String) {
+        if selectedColumns.contains(name) {
+            selectedColumns.remove(name)
+        } else {
+            selectedColumns.insert(name)
+        }
+    }
+
+    var builtSQL: String? {
+        guard let table else { return nil }
+        let target = table.path.map { quoteIdentifier($0) }.joined(separator: ".")
+        let columns: String
+        if selectedColumns.isEmpty {
+            columns = "*"
+        } else {
+            // Preserve table column order rather than selection order.
+            columns = availableColumns
+                .map(\.name)
+                .filter { selectedColumns.contains($0) }
+                .map { quoteIdentifier($0) }
+                .joined(separator: ", ")
+        }
+        var sql = "SELECT \(columns) FROM \(target)"
+        let condition = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !condition.isEmpty {
+            sql += " WHERE \(condition)"
+        }
+        sql += " LIMIT \(max(limit, 1)) OFFSET \(max(offset, 0))"
+        return sql
+    }
+
+    func load() {
+        guard let sql = builtSQL else { return }
+        resultTab.queryText = sql
+        resultTab.run()
+    }
+
+    func nextPage() {
+        offset += limit
+        load()
+    }
+
+    func previousPage() {
+        offset = max(0, offset - limit)
+        load()
+    }
+
+    private func quoteIdentifier(_ name: String) -> String {
+        "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}

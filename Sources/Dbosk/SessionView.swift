@@ -17,7 +17,24 @@ struct SessionView: View {
                 SidebarView(session: session)
                     .navigationSplitViewColumnWidth(min: 180, ideal: 240)
             } detail: {
-                QueryView(tab: session.queryTab)
+                VStack(spacing: 0) {
+                    Picker("Mode", selection: $session.detailMode) {
+                        ForEach(ConnectionSession.DetailMode.allCases, id: \.self) {
+                            Text($0.rawValue).tag($0)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 220)
+                    .padding(.vertical, 6)
+                    Divider()
+                    switch session.detailMode {
+                    case .query:
+                        QueryView(tab: session.queryTab)
+                    case .table:
+                        TableModeView(browser: session.tableBrowser)
+                    }
+                }
             }
         }
         .navigationTitle(session.profile.name)
@@ -59,10 +76,15 @@ struct SidebarView: View {
             ) { node in
                 Label(node.namespace.name, systemImage: node.icon)
                     .onTapGesture(count: 2) {
-                        if case .table = node.namespace.kind {
-                            session.queryTab.queryText = node.defaultQuery
-                            session.queryTab.run()
-                        }
+                        guard case .table = node.namespace.kind else { return }
+                        session.detailMode = .query
+                        session.queryTab.queryText = node.defaultQuery
+                        session.queryTab.run()
+                    }
+                    .onTapGesture(count: 1) {
+                        guard case .table = node.namespace.kind else { return }
+                        session.detailMode = .table
+                        session.selectTable(node.namespace)
                     }
             }
         }
