@@ -42,6 +42,19 @@ xcrun stapler staple dist/Dbosk.dmg
 The app is intentionally **not sandboxed**: the script-based credential loader
 runs arbitrary user executables (e.g. `op`, `aws`) and reads their stdout.
 
+## SSH tunnels
+
+A connection can be routed through an SSH bastion (toggle in the connection
+editor). The tunnel uses the system `ssh` binary with local port forwarding,
+so your `~/.ssh/config`, agent, and known_hosts apply. Auth is key-based only
+(agent or an explicit identity file); the database host/port configured on
+the profile are resolved *from the SSH host*. Tunnel tests:
+
+```sh
+docker compose --profile ssh up -d ssh postgres
+DBOSK_SSH_TESTS=1 swift test
+```
+
 ## Credential scripts
 
 A connection can load its credentials at connect time from an executable that

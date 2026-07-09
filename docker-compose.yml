@@ -30,3 +30,20 @@ services:
     ports:
       - "8009:8000"
     profiles: ["phase8"]
+  # SSH bastion for tunnel tests: key-only auth with the committed
+  # Tests/Fixtures/test_tunnel_key; forwards to the postgres service.
+  ssh:
+    image: alpine:3
+    command: >
+      sh -c "apk add --no-cache openssh &&
+             ssh-keygen -A &&
+             adduser -D tunnel &&
+             sed -i 's/tunnel:!/tunnel:*/' /etc/shadow &&
+             mkdir -p /home/tunnel/.ssh &&
+             echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINXZc3oetlIoKMdcD1/gpjNZ/85zGyOorAkBSz6M5wvc dbosk-test-only' > /home/tunnel/.ssh/authorized_keys &&
+             chown -R tunnel /home/tunnel/.ssh &&
+             chmod 700 /home/tunnel/.ssh && chmod 600 /home/tunnel/.ssh/authorized_keys &&
+             /usr/sbin/sshd -D -e -o AllowTcpForwarding=yes"
+    ports:
+      - "22022:22"
+    profiles: ["ssh"]

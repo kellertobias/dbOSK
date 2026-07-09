@@ -134,13 +134,34 @@ final class AppModel {
         isConnecting = true
         connectionError = nil
         defer { isConnecting = false }
+        var tunnel: SSHTunnel?
         do {
-            let config = try await resolver.resolve(profile)
+            var config = try await resolver.resolve(profile)
+
+            // Route through an SSH tunnel first when configured: forward a
+            // local port to the (resolved) database host and rewrite the
+            // config to point at it.
+            if let tunnelConfig = profile.sshTunnel, config.filePath == nil {
+                let descriptor = AppModel.availableDrivers
+                    .first { $0.id == profile.driverID }
+                let targetPort = config.port ?? descriptor?.defaultPort ?? 0
+                tunnel = try await SSHTunnel.start(
+                    config: tunnelConfig,
+                    targetHost: config.host ?? "localhost",
+                    targetPort: targetPort)
+                config.host = "127.0.0.1"
+                config.port = tunnel?.localPort
+                config.uri = nil  // a URI would bypass the tunnel
+            }
+
             let driver = try makeDriver(profile: profile, config: config)
             try await driver.connect()
-            sessions[profile.id] = ConnectionSession(profile: profile, driver: driver)
+            let session = ConnectionSession(profile: profile, driver: driver)
+            session.tunnel = tunnel
+            sessions[profile.id] = session
             return true
         } catch {
+            tunnel?.stop()
             connectionError = String(describing: error)
             return false
         }
@@ -148,6 +169,7 @@ final class AppModel {
 
     func disconnect(profileID: UUID) {
         let session = sessions.removeValue(forKey: profileID)
+        session?.tunnel?.stop()
         Task { await session?.driver.disconnect() }
     }
 
@@ -192,6 +214,8 @@ final class ConnectionSession: Identifiable {
     var tabs: [WorkTab] = []
     var selectedTabID: WorkTab.ID?
 
+    /// Live SSH tunnel carrying this session's connection, if any.
+    var tunnel: SSHTunnel?
     /// User metadata: saved queries, table notes, groups, hidden flags.
     var metadata: ConnectionMetadata
     /// Transient sidebar toggle to reveal hidden tables.

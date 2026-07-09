@@ -46,6 +46,8 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
     public var filePath: String?
     public var tls: ResolvedConnectionConfig.TLSMode
     public var credentialSource: CredentialSource
+    /// When set, the database connection is routed through an SSH tunnel.
+    public var sshTunnel: SSHTunnelConfig?
 
     /// Set only when decoding a pre-labels profile that stored a fixed
     /// `colorTag`. `AppModel` migrates these into named labels on load and then
@@ -64,7 +66,8 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         database: String? = nil,
         filePath: String? = nil,
         tls: ResolvedConnectionConfig.TLSMode = .preferred,
-        credentialSource: CredentialSource = .none
+        credentialSource: CredentialSource = .none,
+        sshTunnel: SSHTunnelConfig? = nil
     ) {
         self.id = id
         self.name = name
@@ -78,12 +81,13 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         self.filePath = filePath
         self.tls = tls
         self.credentialSource = credentialSource
+        self.sshTunnel = sshTunnel
         self.legacyColorTag = nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, groupName, labelID, driverID, host, port, user
-        case database, filePath, tls, credentialSource
+        case database, filePath, tls, credentialSource, sshTunnel
         case colorTag  // legacy: decode-only, migrated into a label on load
     }
 
@@ -101,6 +105,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         filePath = try c.decodeIfPresent(String.self, forKey: .filePath)
         tls = try c.decode(ResolvedConnectionConfig.TLSMode.self, forKey: .tls)
         credentialSource = try c.decode(CredentialSource.self, forKey: .credentialSource)
+        sshTunnel = try c.decodeIfPresent(SSHTunnelConfig.self, forKey: .sshTunnel)
         legacyColorTag = try c.decodeIfPresent(ColorTag.self, forKey: .colorTag)
     }
 
@@ -118,6 +123,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         try c.encodeIfPresent(filePath, forKey: .filePath)
         try c.encode(tls, forKey: .tls)
         try c.encode(credentialSource, forKey: .credentialSource)
+        try c.encodeIfPresent(sshTunnel, forKey: .sshTunnel)
         // legacyColorTag is intentionally not encoded.
     }
 }

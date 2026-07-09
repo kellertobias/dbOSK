@@ -120,6 +120,11 @@ struct ConnectionEditView: View {
     @State private var scriptPath = ""
     @State private var scriptArgs = ""
     @State private var filePath = ""
+    @State private var tunnelEnabled = false
+    @State private var tunnelHost = ""
+    @State private var tunnelPort = ""
+    @State private var tunnelUser = ""
+    @State private var tunnelIdentity = ""
 
     private var isFileBased: Bool { driverID == SQLiteDriver.descriptor.id }
 
@@ -214,6 +219,23 @@ struct ConnectionEditView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    Toggle("Connect via SSH tunnel", isOn: $tunnelEnabled)
+                    if tunnelEnabled {
+                        TextField("SSH host", text: $tunnelHost)
+                        TextField("SSH port", text: $tunnelPort, prompt: Text("22"))
+                            .frame(maxWidth: 120)
+                        TextField("SSH user", text: $tunnelUser)
+                        HStack {
+                            TextField(
+                                "Identity file", text: $tunnelIdentity,
+                                prompt: Text("Optional — uses agent/default keys"))
+                            Button("Choose…") { chooseIdentityFile() }
+                        }
+                        Text("Key-based auth only (ssh agent or identity file); the database host/port above are reached from the SSH host.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -229,6 +251,19 @@ struct ConnectionEditView: View {
         .padding(20)
         .frame(width: 420)
         .onAppear { populate() }
+    }
+
+    private func chooseIdentityFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh")
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            tunnelIdentity = url.path
+        }
     }
 
     private func chooseFile() {
@@ -275,6 +310,13 @@ struct ConnectionEditView: View {
             scriptPath = config.path
             scriptArgs = config.args.joined(separator: " ")
         }
+        if let tunnel = profile.sshTunnel {
+            tunnelEnabled = true
+            tunnelHost = tunnel.host
+            tunnelPort = tunnel.port == 22 ? "" : String(tunnel.port)
+            tunnelUser = tunnel.user
+            tunnelIdentity = tunnel.identityFile ?? ""
+        }
     }
 
     private func save() {
@@ -300,7 +342,14 @@ struct ConnectionEditView: View {
             database: isFileBased || database.isEmpty ? nil : database,
             filePath: isFileBased && !filePath.isEmpty ? filePath : nil,
             tls: tls,
-            credentialSource: source
+            credentialSource: source,
+            sshTunnel: !isFileBased && tunnelEnabled && !tunnelHost.isEmpty
+                ? SSHTunnelConfig(
+                    host: tunnelHost,
+                    port: Int(tunnelPort) ?? 22,
+                    user: tunnelUser,
+                    identityFile: tunnelIdentity.isEmpty ? nil : tunnelIdentity)
+                : nil
         )
         appModel.upsert(
             updated,
