@@ -205,13 +205,35 @@ final class ConnectionSession: Identifiable {
         try? metadataStore.save(metadata, for: profile.id)
     }
 
-    func saveQuery(named name: String, text: String) {
-        metadata.savedQueries.append(SavedQuery(name: name, text: text))
+    @discardableResult
+    func saveQuery(named name: String, text: String) -> SavedQuery {
+        let query = SavedQuery(name: name, text: text)
+        metadata.savedQueries.append(query)
         persistMetadata()
+        return query
+    }
+
+    /// Overwrites the text of an existing saved query, returning the updated copy.
+    @discardableResult
+    func updateSavedQuery(_ query: SavedQuery, text: String) -> SavedQuery? {
+        guard let index = metadata.savedQueries.firstIndex(where: { $0.id == query.id })
+        else { return nil }
+        metadata.savedQueries[index].text = text
+        persistMetadata()
+        return metadata.savedQueries[index]
     }
 
     func deleteSavedQuery(_ query: SavedQuery) {
         metadata.savedQueries.removeAll { $0.id == query.id }
+        persistMetadata()
+    }
+
+    func renameSavedQuery(_ query: SavedQuery, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let index = metadata.savedQueries.firstIndex(where: { $0.id == query.id })
+        else { return }
+        metadata.savedQueries[index].name = trimmed
         persistMetadata()
     }
 
@@ -299,9 +321,14 @@ final class ConnectionSession: Identifiable {
     }
 
     /// Opens a new raw-query tab, optionally prefilled and executed.
-    func openQueryTab(initialSQL: String = "", runImmediately: Bool = false) {
+    func openQueryTab(
+        initialSQL: String = "",
+        saved: SavedQuery? = nil,
+        runImmediately: Bool = false
+    ) {
         let queryTab = QueryTab(driver: driver)
-        queryTab.queryText = initialSQL
+        queryTab.queryText = saved?.text ?? initialSQL
+        queryTab.savedQuery = saved
         let tab = WorkTab(title: "Query", content: .query(queryTab))
         tabs.append(tab)
         selectedTabID = tab.id
@@ -358,6 +385,9 @@ final class QueryTab {
     }
 
     var queryText: String = ""
+    /// The saved query this tab originated from / is linked to, if any.
+    /// Its `text` is the last-saved snapshot used to detect unsaved edits.
+    var savedQuery: SavedQuery?
     var runState: RunState = .idle
     var exportState: ExportState = .idle
     var columns: [ColumnMeta] = []
@@ -375,6 +405,12 @@ final class QueryTab {
     init(driver: any DatabaseDriver) {
         self.driver = driver
         self.language = type(of: driver).descriptor.queryLanguage
+    }
+
+    /// True when linked to a saved query whose text differs from the editor.
+    var hasUnsavedChanges: Bool {
+        guard let savedQuery else { return false }
+        return savedQuery.text != queryText
     }
 
     func run() {
@@ -460,12 +496,22 @@ final class WorkTab: Identifiable {
     }
 
     let id = UUID()
-    var title: String
+    /// Fallback title for tabs not linked to a saved query.
+    var baseTitle: String
     let content: Content
 
     init(title: String, content: Content) {
-        self.title = title
+        self.baseTitle = title
         self.content = content
+    }
+
+    /// A query tab linked to a saved query shows its name, with a "(changed)"
+    /// suffix while the editor holds unsaved edits.
+    var title: String {
+        if case .query(let queryTab) = content, let saved = queryTab.savedQuery {
+            return saved.name + (queryTab.hasUnsavedChanges ? " (changed)" : "")
+        }
+        return baseTitle
     }
 
     var systemImage: String {

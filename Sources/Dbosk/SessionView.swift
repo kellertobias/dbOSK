@@ -6,7 +6,6 @@ import SwiftUI
 
 struct SessionView: View {
     @Environment(AppModel.self) private var appModel
-    @Environment(\.dismiss) private var dismiss
     @Bindable var session: ConnectionSession
 
     var body: some View {
@@ -20,6 +19,19 @@ struct SessionView: View {
             NavigationSplitView {
                 SidebarView(session: session)
                     .navigationSplitViewColumnWidth(min: 180, ideal: 240)
+                    // Attached to the sidebar column so the title renders in
+                    // the leftmost toolbar section, next to the sidebar toggle.
+                    .toolbar {
+                        if #available(macOS 26.0, *) {
+                            // Opt out of the Liquid Glass toolbar background so
+                            // the title and badge read as plain content, not
+                            // buttons.
+                            ToolbarItem(placement: .navigation) { titleView }
+                                .sharedBackgroundVisibility(.hidden)
+                        } else {
+                            ToolbarItem(placement: .navigation) { titleView }
+                        }
+                    }
             } detail: {
                 VStack(spacing: 0) {
                     TabBarView(session: session)
@@ -29,17 +41,32 @@ struct SessionView: View {
             }
         }
         .navigationTitle(session.profile.name)
-        .navigationSubtitle(session.profile.groupName ?? "")
-        .toolbar {
-            if let label = appModel.label(for: session.profile) {
-                ToolbarItem(placement: .primaryAction) {
-                    LabelBadge(label: label)
-                }
-            }
-        }
+        // Keep navigationTitle for window identity, but hide its visible item so
+        // it doesn't render "Test" separately from our leading title view.
+        .hidingWindowTitle()
         .task { await session.loadRoot() }
         // Closing the window ends the session — no separate disconnect control.
         .onDisappear { appModel.disconnect(profileID: session.profile.id) }
+    }
+
+    /// Leading toolbar title: "Group: Name" on one line, with the label badge
+    /// stacked beneath it.
+    private var titleView: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(toolbarTitle)
+                .font(.headline)
+                .lineLimit(1)
+            if let label = appModel.label(for: session.profile) {
+                LabelBadge(label: label)
+            }
+        }
+    }
+
+    private var toolbarTitle: String {
+        if let group = session.profile.groupName, !group.isEmpty {
+            return "\(group): \(session.profile.name)"
+        }
+        return session.profile.name
     }
 
     @ViewBuilder
@@ -57,6 +84,19 @@ struct SessionView: View {
                 systemImage: "tablecells",
                 description: Text(
                     "Click a table in the sidebar, or the SQL button on a schema."))
+        }
+    }
+}
+
+private extension View {
+    /// Removes the default window-title toolbar item (macOS 15+) while leaving
+    /// `navigationTitle` intact for window identity. No-op on older systems.
+    @ViewBuilder
+    func hidingWindowTitle() -> some View {
+        if #available(macOS 15.0, *) {
+            toolbar(removing: .title)
+        } else {
+            self
         }
     }
 }
@@ -79,7 +119,8 @@ struct TabBarView: View {
             Button {
                 session.openQueryTab()
             } label: {
-                Image(systemName: "plus")
+                Label("New Query", systemImage: "plus")
+                    .font(.callout)
             }
             .buttonStyle(.borderless)
             .help("New query tab")
@@ -122,10 +163,12 @@ struct TabBarView: View {
 
 struct SidebarView: View {
     @Bindable var session: ConnectionSession
-    @State private var hoveredNodeID: String?
     @State private var noteTarget: DBCore.Namespace?
     @State private var groupTarget: DBCore.Namespace?
     @State private var newGroupName = ""
+    @State private var renameTarget: SavedQuery?
+    @State private var renameText = ""
+    @State private var expandedIDs: Set<String> = []
 
     var body: some View {
         List {
@@ -140,13 +183,10 @@ struct SidebarView: View {
                 }
             }
             Section {
-                OutlineGroup(
-                    session.rootNamespaces.map {
-                        SidebarNode(kind: .namespace($0, parent: nil), session: session)
-                    },
-                    children: \.children
-                ) { node in
-                    row(for: node)
+                ForEach(session.rootNamespaces.map {
+                    SidebarNode(kind: .namespace($0, parent: nil), session: session)
+                }) { node in
+                    outlineRow(node)
                 }
             } header: {
                 HStack(spacing: 8) {
@@ -190,6 +230,11 @@ struct SidebarView: View {
                 .padding(.trailing, 12)
             }
         }
+        // Give the database name / table-visibility controls room below the
+        // window chrome instead of crowding the top edge. Fixed padding (not
+        // contentMargins) so the offset can't scroll away when the list is
+        // clicked, which made the sidebar jump vertically.
+        .padding(.top, 16)
         .sheet(item: $noteTarget) { namespace in
             NoteEditorView(session: session, namespace: namespace)
         }
@@ -206,6 +251,22 @@ struct SidebarView: View {
         } message: {
             Text("Group tables within their schema in the sidebar.")
         }
+        .alert("Rename Query", isPresented: renameAlertShown) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameTarget = nil }
+            Button("Rename") {
+                if let target = renameTarget {
+                    session.renameSavedQuery(target, to: renameText)
+                }
+                renameTarget = nil
+            }
+        }
+    }
+
+    private var renameAlertShown: Binding<Bool> {
+        Binding(
+            get: { renameTarget != nil },
+            set: { if !$0 { renameTarget = nil } })
     }
 
     private var groupAlertShown: Binding<Bool> {
@@ -218,19 +279,69 @@ struct SidebarView: View {
         Label(saved.name, systemImage: "bookmark")
             .contentShape(Rectangle())
             .onTapGesture {
-                session.openQueryTab(initialSQL: saved.text)
+                session.openQueryTab(saved: saved)
             }
             .help(saved.text)
             .contextMenu {
-                Button("Open") { session.openQueryTab(initialSQL: saved.text) }
+                Button("Open") { session.openQueryTab(saved: saved) }
                 Button("Run") {
-                    session.openQueryTab(initialSQL: saved.text, runImmediately: true)
+                    session.openQueryTab(saved: saved, runImmediately: true)
                 }
                 Divider()
+                Button("Rename…") {
+                    renameText = saved.name
+                    renameTarget = saved
+                }
                 Button("Delete", role: .destructive) {
                     session.deleteSavedQuery(saved)
                 }
             }
+    }
+
+    /// Whether this node expands/collapses on click rather than opening.
+    private func isExpandableNode(_ node: SidebarNode) -> Bool {
+        switch node.kind {
+        case .group:
+            return true
+        case .namespace(let namespace, _):
+            return namespace.isExpandable
+        }
+    }
+
+    private func outlineRow(_ node: SidebarNode) -> AnyView {
+        if isExpandableNode(node) {
+            return AnyView(
+                DisclosureGroup(isExpanded: expandedBinding(for: node.id)) {
+                    ForEach(node.children ?? []) { child in
+                        outlineRow(child)
+                    }
+                } label: {
+                    row(for: node)
+                        .onTapGesture { toggleExpanded(node.id) }
+                })
+        } else {
+            return AnyView(row(for: node))
+        }
+    }
+
+    private func expandedBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedIDs.contains(id) },
+            set: { isExpanded in
+                if isExpanded {
+                    expandedIDs.insert(id)
+                } else {
+                    expandedIDs.remove(id)
+                }
+            })
+    }
+
+    private func toggleExpanded(_ id: String) {
+        if expandedIDs.contains(id) {
+            expandedIDs.remove(id)
+        } else {
+            expandedIDs.insert(id)
+        }
     }
 
     @ViewBuilder
@@ -244,8 +355,9 @@ struct SidebarView: View {
                 Label(name, systemImage: "folder.fill")
                     .foregroundStyle(.secondary)
             }
+            .contentShape(Rectangle())
         case .namespace(let namespace, let parent):
-            namespaceRow(namespace, parent: parent, nodeID: node.id)
+            namespaceRow(namespace, parent: parent)
         }
     }
 
@@ -268,7 +380,7 @@ struct SidebarView: View {
     }
 
     private func namespaceRow(
-        _ namespace: DBCore.Namespace, parent: DBCore.Namespace?, nodeID: String
+        _ namespace: DBCore.Namespace, parent: DBCore.Namespace?
     ) -> some View {
         let isHidden = session.isHidden(namespace)
         let note = session.note(for: namespace)
@@ -289,38 +401,18 @@ struct SidebarView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-            Spacer()
-            // Raw-query shortcut on database/schema nodes.
-            if namespace.isExpandable, hoveredNodeID == nodeID,
-               !session.editingVisibility {
-                Button {
-                    session.openQueryTab()
-                } label: {
-                    Text("SQL")
-                        .font(.system(size: 9, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.accentColor.opacity(0.2)))
-                }
-                .buttonStyle(.borderless)
-                .help("New query on \(namespace.name)")
-            }
         }
         .help(note ?? "")
         .contentShape(Rectangle())
-        .onHover { hovering in
-            hoveredNodeID = hovering ? nodeID : nil
-        }
-        .onTapGesture {
-            guard case .table = namespace.kind else { return }
-            if session.editingVisibility {
-                session.setHidden(!isHidden, for: namespace)
-            } else {
-                session.openTable(namespace)
-            }
-        }
+        .modifier(TableTapModifier(
+            isTable: namespace.kind.isTable,
+            action: {
+                if session.editingVisibility {
+                    session.setHidden(!isHidden, for: namespace)
+                } else {
+                    session.openTable(namespace)
+                }
+            }))
         .contextMenu {
             if case .table = namespace.kind {
                 tableContextMenu(namespace, parent: parent)
@@ -458,6 +550,21 @@ extension DBCore.Namespace.Kind {
     }
 }
 
+/// Attaches a tap gesture only for table rows, letting non-table (expandable)
+/// namespace rows fall through to the enclosing DisclosureGroup's tap-to-expand.
+private struct TableTapModifier: ViewModifier {
+    let isTable: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if isTable {
+            content.onTapGesture(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Note editor
 
 struct NoteEditorView: View {
@@ -533,16 +640,9 @@ struct QueryView: View {
                 .frame(minHeight: 120)
         }
         .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    savedQueryName = ""
-                    savingQuery = true
-                } label: {
-                    Label("Save Query", systemImage: "bookmark")
-                }
-                .disabled(tab.queryText.trimmingCharacters(
-                    in: .whitespacesAndNewlines).isEmpty)
-                .help("Save this query to the sidebar")
+            ToolbarItemGroup(placement: .primaryAction) {
+                Spacer()
+                saveControl
                 ExportMenu(tab: tab)
                 if tab.runState == .running || tab.runState == .streaming {
                     Button {
@@ -566,10 +666,44 @@ struct QueryView: View {
             Button("Save") {
                 let name = savedQueryName.trimmingCharacters(in: .whitespaces)
                 guard !name.isEmpty else { return }
-                session.saveQuery(named: name, text: tab.queryText)
+                tab.savedQuery = session.saveQuery(named: name, text: tab.queryText)
             }
         } message: {
             Text("Saved queries appear in the sidebar for this connection.")
+        }
+    }
+
+    /// A single "Save Query" button when unlinked; a menu offering
+    /// update-in-place or save-as-new once the tab is tied to a saved query.
+    @ViewBuilder
+    private var saveControl: some View {
+        let isEmpty = tab.queryText.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
+        if let saved = tab.savedQuery {
+            Menu {
+                Button("Update “\(saved.name)”") {
+                    tab.savedQuery = session.updateSavedQuery(saved, text: tab.queryText)
+                }
+                .disabled(!tab.hasUnsavedChanges)
+                Button("Save as New…") {
+                    savedQueryName = ""
+                    savingQuery = true
+                }
+            } label: {
+                Label("Save Query", systemImage: "bookmark")
+            }
+            .menuIndicator(.visible)
+            .disabled(isEmpty)
+            .help("Update the saved query or save a copy")
+        } else {
+            Button {
+                savedQueryName = ""
+                savingQuery = true
+            } label: {
+                Label("Save Query", systemImage: "bookmark")
+            }
+            .disabled(isEmpty)
+            .help("Save this query to the sidebar")
         }
     }
 
