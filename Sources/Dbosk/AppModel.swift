@@ -617,6 +617,18 @@ final class TableBrowser {
     var structureError: String?
     var isLoadingStructure = false
 
+    enum ApplyState: Equatable {
+        case idle
+        case applying
+        case failed(String)
+    }
+
+    /// Staged edits awaiting Apply; overlays `resultTab.rows`, never mutates them.
+    let pending = PendingChangeSet()
+    var applyState: ApplyState = .idle
+    /// Navigation blocked by pending edits; the UI confirms or cancels it.
+    var pendingNavigation: (() -> Void)?
+
     /// Executes the built query; reuses the streaming runner.
     let resultTab: QueryTab
 
@@ -639,7 +651,11 @@ final class TableBrowser {
         columnsError = nil
         structure = nil
         structureError = nil
-        if displayMode == .structure { loadStructure() }
+        discardChanges()
+        pendingNavigation = nil
+        // Editing needs the primary key upfront, so fetch the structure
+        // eagerly instead of waiting for the first switch to Structure mode.
+        if displayMode == .structure || descriptor.supportsTableEditing { loadStructure() }
         isLoadingColumns = true
         // Kick off the first page immediately; columns load in parallel so the
         // user sees data as fast as the server can deliver it.
@@ -706,12 +722,160 @@ final class TableBrowser {
     }
 
     func nextPage() {
-        offset += limit
-        load()
+        requestNavigation {
+            self.offset += self.limit
+            self.load()
+        }
     }
 
     func previousPage() {
-        offset = max(0, offset - limit)
-        load()
+        requestNavigation {
+            self.offset = max(0, self.offset - self.limit)
+            self.load()
+        }
+    }
+
+    // MARK: - Staged editing
+
+    /// Nil when staged editing is allowed; otherwise a user-facing reason.
+    var editingDisabledReason: String? {
+        guard descriptor.supportsTableEditing else {
+            return "\(descriptor.displayName) does not support editing"
+        }
+        guard let table else { return "No table selected" }
+        guard table.kind == .table(.table) else { return "Only tables can be edited" }
+        guard let structure else {
+            return isLoadingStructure ? "Loading table structure…" : "Table structure unavailable"
+        }
+        let keyNames = structure.columns.filter(\.isPrimaryKey).map(\.name)
+        guard !keyNames.isEmpty else { return "Table has no primary key" }
+        guard case .done = resultTab.runState else { return "Waiting for table data…" }
+        let loadedNames = Set(resultTab.columns.map(\.name))
+        guard keyNames.allSatisfy(loadedNames.contains) else {
+            return "Include the primary key column(s) to edit"
+        }
+        return nil
+    }
+
+    var isEditable: Bool { editingDisabledReason == nil }
+
+    /// Runs `action` immediately, or parks it behind a discard confirmation
+    /// when edits are pending.
+    func requestNavigation(_ action: @escaping () -> Void) {
+        if pending.isEmpty {
+            action()
+        } else {
+            pendingNavigation = action
+        }
+    }
+
+    func confirmPendingNavigation() {
+        let action = pendingNavigation
+        pendingNavigation = nil
+        discardChanges()
+        action?()
+    }
+
+    func cancelPendingNavigation() {
+        pendingNavigation = nil
+    }
+
+    func discardChanges() {
+        pending.discardAll()
+        applyState = .idle
+    }
+
+    /// Generates the SQL for all pending changes: DELETEs first (freeing
+    /// unique keys inserts may reuse), then UPDATEs, then INSERTs.
+    func buildApplyStatements() throws -> [String] {
+        guard let table, let structure else {
+            throw DBError(kind: .queryFailed, message: "Table structure not loaded")
+        }
+        let columns = resultTab.columns
+        let declaredTypes = Dictionary(
+            structure.columns.map { ($0.name, $0.dbTypeName) },
+            uniquingKeysWith: { first, _ in first })
+        let keyColumns = structure.columns.filter(\.isPrimaryKey)
+
+        // Result columns report "any" for SQLite, so prefer declared types.
+        func columnType(at index: Int) -> String {
+            declaredTypes[columns[index].name] ?? columns[index].dbTypeName
+        }
+
+        func parse(_ text: String?, columnName: String, typeName: String) throws -> DBValue {
+            do {
+                return try DBValueParser.parse(text, dbTypeName: typeName)
+            } catch {
+                throw DBError(
+                    kind: .queryFailed,
+                    message: "Column \"\(columnName)\": \(String(describing: error))")
+            }
+        }
+
+        /// Original (pre-edit) primary-key values identifying `row`.
+        func keyValues(for row: ResultRow) throws -> [MutationStatementBuilder.ColumnValue] {
+            try keyColumns.map { key in
+                guard let index = columns.firstIndex(where: { $0.name == key.name }),
+                      let value = row.values[safe: index]
+                else {
+                    throw DBError(
+                        kind: .queryFailed,
+                        message: "Primary key column \"\(key.name)\" is not loaded")
+                }
+                return .init(column: key.name, value: value)
+            }
+        }
+
+        var statements: [String] = []
+        for rowID in pending.deletedRowIDs.sorted() {
+            guard let row = resultTab.rows[safe: rowID] else { continue }
+            statements.append(try MutationStatementBuilder.delete(
+                from: table, matching: try keyValues(for: row), for: descriptor))
+        }
+        for (rowID, edits) in pending.cellEdits.sorted(by: { $0.key < $1.key })
+        where !pending.deletedRowIDs.contains(rowID) {
+            guard let row = resultTab.rows[safe: rowID] else { continue }
+            let assignments = try edits.sorted { $0.key < $1.key }
+                .map { columnIndex, text in
+                    let name = columns[columnIndex].name
+                    return MutationStatementBuilder.ColumnValue(
+                        column: name,
+                        value: try parse(text, columnName: name, typeName: columnType(at: columnIndex)))
+                }
+            statements.append(try MutationStatementBuilder.update(
+                table, set: assignments, matching: try keyValues(for: row), for: descriptor))
+        }
+        for inserted in pending.insertedRows {
+            let cells = inserted.cells.sorted { $0.key < $1.key }
+            guard !cells.isEmpty else {
+                throw DBError(kind: .queryFailed, message: "New row has no values")
+            }
+            let names = cells.map { columns[$0.key].name }
+            let values = try cells.map { columnIndex, text in
+                try parse(text, columnName: columns[columnIndex].name,
+                          typeName: columnType(at: columnIndex))
+            }
+            statements.append(try MutationStatementBuilder.insert(
+                into: table, columns: names, values: values, for: descriptor))
+        }
+        return statements
+    }
+
+    /// Executes previewed statements atomically; on success clears the staged
+    /// set and reloads the page. On failure the staged set stays intact (the
+    /// transaction rolled back) so the user can fix and retry.
+    func apply(statements: [String]) {
+        guard !statements.isEmpty, applyState != .applying else { return }
+        applyState = .applying
+        Task { [driver] in
+            do {
+                _ = try await driver.executeBatch(statements)
+                self.pending.discardAll()
+                self.applyState = .idle
+                self.load()
+            } catch {
+                self.applyState = .failed(String(describing: error))
+            }
+        }
     }
 }

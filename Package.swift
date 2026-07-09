@@ -77,6 +77,7 @@ let package = Package(
             ]
         ),
         .testTarget(name: "DBCoreTests", dependencies: ["DBCore"]),
+        .testTarget(name: "DboskTests", dependencies: ["Dbosk"]),
         .testTarget(
             name: "DBDriverPostgresTests",
             dependencies: ["DBDriverPostgres", "Connections"]),
