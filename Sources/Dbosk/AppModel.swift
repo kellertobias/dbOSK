@@ -1,5 +1,7 @@
 import Connections
 import DBCore
+import DBDriverMongo
+import DBDriverMySQL
 import DBDriverPostgres
 import Foundation
 import Observation
@@ -7,9 +9,11 @@ import Observation
 @Observable
 @MainActor
 final class AppModel {
-    /// Drivers with a working implementation; MySQL, MongoDB, SQLite follow.
+    /// Drivers with a working implementation; SQLite, Redis, DynamoDB follow.
     static let availableDrivers: [DriverDescriptor] = [
-        PostgresDriver.descriptor
+        PostgresDriver.descriptor,
+        MySQLDriver.descriptor,
+        MongoDriver.descriptor,
     ]
 
     var profiles: [ConnectionProfile] = []
@@ -77,6 +81,10 @@ final class AppModel {
         switch profile.driverID {
         case PostgresDriver.descriptor.id:
             return try PostgresDriver(config: config)
+        case MySQLDriver.descriptor.id:
+            return try MySQLDriver(config: config)
+        case MongoDriver.descriptor.id:
+            return try MongoDriver(config: config)
         default:
             throw DBError(
                 kind: .unsupported,
@@ -93,6 +101,8 @@ final class ConnectionSession: Identifiable {
     let id = UUID()
     let profile: ConnectionProfile
     let driver: any DatabaseDriver
+
+    var descriptor: DriverDescriptor { type(of: driver).descriptor }
 
     var rootNamespaces: [Namespace] = []
     var children: [Namespace.ID: [Namespace]] = [:]
@@ -193,9 +203,11 @@ final class QueryTab {
     private var cancelHandler: (@Sendable () async -> Void)?
 
     var pageSize = 500
+    let language: DriverDescriptor.QueryLanguage
 
     init(driver: any DatabaseDriver) {
         self.driver = driver
+        self.language = type(of: driver).descriptor.queryLanguage
     }
 
     func run() {
@@ -294,9 +306,11 @@ final class TableBrowser {
     let resultTab: QueryTab
 
     private let driver: any DatabaseDriver
+    let descriptor: DriverDescriptor
 
     init(driver: any DatabaseDriver) {
         self.driver = driver
+        self.descriptor = type(of: driver).descriptor
         self.resultTab = QueryTab(driver: driver)
     }
 
@@ -330,9 +344,19 @@ final class TableBrowser {
         }
     }
 
-    var builtSQL: String? {
+    var builtQuery: String? {
         guard let table else { return nil }
-        let target = table.path.map { quoteIdentifier($0) }.joined(separator: ".")
+        let condition = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if descriptor.queryLanguage == .mongo {
+            // Filter field holds a JSON document for Mongo collections.
+            var query = "db.\(table.path.joined(separator: ".")).find(\(condition.isEmpty ? "{}" : condition))"
+            if offset > 0 { query += ".skip(\(max(offset, 0)))" }
+            query += ".limit(\(max(limit, 1)))"
+            return query
+        }
+
+        let target = table.path.map { descriptor.quoted($0) }.joined(separator: ".")
         let columns: String
         if selectedColumns.isEmpty {
             columns = "*"
@@ -341,11 +365,10 @@ final class TableBrowser {
             columns = availableColumns
                 .map(\.name)
                 .filter { selectedColumns.contains($0) }
-                .map { quoteIdentifier($0) }
+                .map { descriptor.quoted($0) }
                 .joined(separator: ", ")
         }
         var sql = "SELECT \(columns) FROM \(target)"
-        let condition = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
         if !condition.isEmpty {
             sql += " WHERE \(condition)"
         }
@@ -354,8 +377,8 @@ final class TableBrowser {
     }
 
     func load() {
-        guard let sql = builtSQL else { return }
-        resultTab.queryText = sql
+        guard let query = builtQuery else { return }
+        resultTab.queryText = query
         resultTab.run()
     }
 
@@ -367,9 +390,5 @@ final class TableBrowser {
     func previousPage() {
         offset = max(0, offset - limit)
         load()
-    }
-
-    private func quoteIdentifier(_ name: String) -> String {
-        "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
     }
 }

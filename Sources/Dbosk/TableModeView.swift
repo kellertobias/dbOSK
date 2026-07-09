@@ -16,7 +16,7 @@ struct TableModeView: View {
             VStack(spacing: 0) {
                 controls
                 Divider()
-                ResultsTableView(
+                ResultsArea(
                     columns: browser.resultTab.columns,
                     rows: browser.resultTab.rows,
                     version: browser.resultTab.resultVersion)
@@ -35,13 +35,19 @@ struct TableModeView: View {
                 if browser.isLoadingColumns {
                     ProgressView().controlSize(.small)
                 }
-                columnsMenu
-                    .disabled(browser.isLoadingColumns)
+                // Column projection is SQL-only in v1.
+                if browser.descriptor.queryLanguage != .mongo {
+                    columnsMenu
+                        .disabled(browser.isLoadingColumns)
+                }
             }
             HStack {
-                Text("WHERE").font(.caption).foregroundStyle(.secondary)
+                Text(browser.descriptor.queryLanguage == .mongo ? "FILTER" : "WHERE")
+                    .font(.caption).foregroundStyle(.secondary)
                 TextField(
-                    "condition, e.g. status = 'active'",
+                    browser.descriptor.queryLanguage == .mongo
+                        ? #"JSON filter, e.g. {"status": "active"}"#
+                        : "condition, e.g. status = 'active'",
                     text: $browser.whereClause)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))

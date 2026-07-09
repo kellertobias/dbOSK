@@ -11,6 +11,9 @@ public struct DriverDescriptor: Sendable {
     public let defaultPort: Int?
     public let supportsStreaming: Bool
     public let supportsServerSideCancel: Bool
+    /// Character wrapping identifiers in generated SQL ("\"" for standard SQL,
+    /// "`" for MySQL). Empty for non-SQL drivers.
+    public let identifierQuote: String
 
     public init(
         id: String,
@@ -18,7 +21,8 @@ public struct DriverDescriptor: Sendable {
         queryLanguage: QueryLanguage,
         defaultPort: Int?,
         supportsStreaming: Bool,
-        supportsServerSideCancel: Bool
+        supportsServerSideCancel: Bool,
+        identifierQuote: String = "\""
     ) {
         self.id = id
         self.displayName = displayName
@@ -26,6 +30,15 @@ public struct DriverDescriptor: Sendable {
         self.defaultPort = defaultPort
         self.supportsStreaming = supportsStreaming
         self.supportsServerSideCancel = supportsServerSideCancel
+        self.identifierQuote = identifierQuote
+    }
+
+    /// Quotes an identifier for this driver's SQL dialect.
+    public func quoted(_ identifier: String) -> String {
+        guard !identifierQuote.isEmpty else { return identifier }
+        let escaped = identifier.replacingOccurrences(
+            of: identifierQuote, with: identifierQuote + identifierQuote)
+        return identifierQuote + escaped + identifierQuote
     }
 }
 

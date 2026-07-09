@@ -217,8 +217,28 @@ struct NamespaceNode: @MainActor Identifiable {
     }
 
     var defaultQuery: String {
-        let path = namespace.path.map { "\"\($0)\"" }.joined(separator: ".")
+        let descriptor = session.descriptor
+        if descriptor.queryLanguage == .mongo {
+            return "db.\(namespace.path.joined(separator: ".")).find({}).limit(100)"
+        }
+        let path = namespace.path.map { descriptor.quoted($0) }.joined(separator: ".")
         return "SELECT * FROM \(path) LIMIT 100;"
+    }
+}
+
+/// Picks the right renderer: document-shaped results (Mongo) get the
+/// two-column list + tree view, everything else the flat table.
+struct ResultsArea: View {
+    let columns: [ColumnMeta]
+    let rows: [ResultRow]
+    let version: Int
+
+    var body: some View {
+        if columns.count == 1, columns[0].dbTypeName == "document" {
+            DocumentResultsView(rows: rows)
+        } else {
+            ResultsTableView(columns: columns, rows: rows, version: version)
+        }
     }
 }
 
@@ -230,12 +250,11 @@ struct QueryView: View {
     var body: some View {
         VSplitView {
             VStack(spacing: 0) {
-                TextEditor(text: $tab.queryText)
-                    .font(.system(.body, design: .monospaced))
+                SyntaxTextEditor(text: $tab.queryText, language: tab.language)
                     .frame(minHeight: 80)
                 statusBar
             }
-            ResultsTableView(columns: tab.columns, rows: tab.rows, version: tab.resultVersion)
+            ResultsArea(columns: tab.columns, rows: tab.rows, version: tab.resultVersion)
                 .frame(minHeight: 120)
         }
         .toolbar {

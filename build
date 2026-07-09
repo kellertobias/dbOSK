@@ -3,6 +3,7 @@
 #   ./build                  debug build
 #   ./build archive          release build
 #   ./build archive install  release build, then install Dbosk.app to ~/Applications
+#   ./build open             debug build, kill running instances, launch a fresh one
 set -euo pipefail
 
 APP_NAME="Dbosk"
@@ -54,4 +55,14 @@ if [[ "$mode" == "archive" && "$action" == "install" ]]; then
 PLIST
 
     echo "Installed $APP_BUNDLE"
+fi
+
+if [[ "$mode" == "open" ]]; then
+    pkill -f "$INSTALL_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+    pkill -f "/$APP_NAME$" 2>/dev/null || true
+    sleep 0.5
+
+    nohup "$BIN_PATH" >/tmp/"$APP_NAME".log 2>&1 &
+    disown
+    echo "Started $APP_NAME (pid $!)"
 fi
