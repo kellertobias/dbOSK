@@ -1,6 +1,8 @@
+import AppKit
 import Connections
 import DBCore
 import DBDriverPostgres
+import DBDriverSQLite
 import SwiftUI
 
 struct ConnectionListView: View {
@@ -116,6 +118,9 @@ struct ConnectionEditView: View {
     @State private var password = ""
     @State private var scriptPath = ""
     @State private var scriptArgs = ""
+    @State private var filePath = ""
+
+    private var isFileBased: Bool { driverID == SQLiteDriver.descriptor.id }
 
     enum CredentialMode: String, CaseIterable {
         case none = "None"
@@ -161,32 +166,43 @@ struct ConnectionEditView: View {
                         SettingsLink { Text("Manage…") }
                     }
                 }
-                TextField("Host", text: $host)
-                TextField("Port", text: $port, prompt: Text(defaultPortPrompt))
-                    .frame(maxWidth: 120)
-                TextField("User", text: $user)
-                TextField("Database", text: $database)
-                Picker("TLS", selection: $tls) {
-                    ForEach(ResolvedConnectionConfig.TLSMode.allCases, id: \.self) {
-                        Text($0.displayName).tag($0)
+                if isFileBased {
+                    LabeledContent("File") {
+                        HStack {
+                            TextField(
+                                "Path", text: $filePath,
+                                prompt: Text("~/path/to/database.sqlite"))
+                            Button("Choose…") { chooseFile() }
+                        }
                     }
-                }
-                Picker("Credentials", selection: $credentialMode) {
-                    ForEach(CredentialMode.allCases, id: \.self) {
-                        Text($0.rawValue).tag($0)
+                } else {
+                    TextField("Host", text: $host)
+                    TextField("Port", text: $port, prompt: Text(defaultPortPrompt))
+                        .frame(maxWidth: 120)
+                    TextField("User", text: $user)
+                    TextField("Database", text: $database)
+                    Picker("TLS", selection: $tls) {
+                        ForEach(ResolvedConnectionConfig.TLSMode.allCases, id: \.self) {
+                            Text($0.displayName).tag($0)
+                        }
                     }
-                }
-                switch credentialMode {
-                case .none:
-                    EmptyView()
-                case .password:
-                    SecureField("Password", text: $password)
-                case .script:
-                    TextField("Script path", text: $scriptPath)
-                    TextField("Arguments", text: $scriptArgs)
-                    Text("The script must print JSON with host, port, user, password, database, or uri.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Picker("Credentials", selection: $credentialMode) {
+                        ForEach(CredentialMode.allCases, id: \.self) {
+                            Text($0.rawValue).tag($0)
+                        }
+                    }
+                    switch credentialMode {
+                    case .none:
+                        EmptyView()
+                    case .password:
+                        SecureField("Password", text: $password)
+                    case .script:
+                        TextField("Script path", text: $scriptPath)
+                        TextField("Arguments", text: $scriptArgs)
+                        Text("The script must print JSON with host, port, user, password, database, or uri.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -196,12 +212,23 @@ struct ConnectionEditView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.isEmpty)
+                    .disabled(name.isEmpty || (isFileBased && filePath.isEmpty))
             }
         }
         .padding(20)
         .frame(width: 420)
         .onAppear { populate() }
+    }
+
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            filePath = url.path
+            if name.isEmpty { name = url.deletingPathExtension().lastPathComponent }
+        }
     }
 
     private var existingGroups: [String] {
@@ -224,6 +251,7 @@ struct ConnectionEditView: View {
         port = profile.port.map(String.init) ?? ""
         user = profile.user ?? ""
         database = profile.database ?? ""
+        filePath = profile.filePath ?? ""
         tls = profile.tls
         switch profile.credentialSource {
         case .none:
@@ -241,6 +269,7 @@ struct ConnectionEditView: View {
     private func save() {
         let source: CredentialSource
         switch credentialMode {
+        case _ where isFileBased: source = .none
         case .none: source = .none
         case .password: source = .keychain
         case .script:
@@ -254,14 +283,17 @@ struct ConnectionEditView: View {
                 ? nil : groupName.trimmingCharacters(in: .whitespaces),
             labelID: labelID,
             driverID: driverID,
-            host: host.isEmpty ? nil : host,
-            port: Int(port),
-            user: user.isEmpty ? nil : user,
-            database: database.isEmpty ? nil : database,
+            host: isFileBased || host.isEmpty ? nil : host,
+            port: isFileBased ? nil : Int(port),
+            user: isFileBased || user.isEmpty ? nil : user,
+            database: isFileBased || database.isEmpty ? nil : database,
+            filePath: isFileBased && !filePath.isEmpty ? filePath : nil,
             tls: tls,
             credentialSource: source
         )
-        appModel.upsert(updated, password: credentialMode == .password ? password : nil)
+        appModel.upsert(
+            updated,
+            password: !isFileBased && credentialMode == .password ? password : nil)
         dismiss()
     }
 }

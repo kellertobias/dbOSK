@@ -30,9 +30,34 @@ struct DboskApp: App {
 
         // Preferences (⌘,) — define the labels connections can carry.
         Settings {
-            LabelSettingsView()
-                .environment(appModel)
+            TabView {
+                GeneralSettingsView()
+                    .tabItem { Label("General", systemImage: "gearshape") }
+                LabelSettingsView()
+                    .tabItem { Label("Labels", systemImage: "tag") }
+            }
+            .environment(appModel)
         }
+    }
+}
+
+struct GeneralSettingsView: View {
+    @AppStorage(QueryTab.pageSizeDefaultsKey) private var pageSize = 500
+
+    var body: some View {
+        Form {
+            Picker("Fetch chunk size", selection: $pageSize) {
+                ForEach([100, 250, 500, 1000, 5000], id: \.self) { size in
+                    Text("\(size) rows").tag(size)
+                }
+            }
+            .frame(maxWidth: 280)
+            Text("How many rows are fetched per chunk while streaming results. Applies to newly opened tabs.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 }
 

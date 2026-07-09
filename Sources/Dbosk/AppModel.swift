@@ -4,17 +4,19 @@ import Export
 import DBDriverMongo
 import DBDriverMySQL
 import DBDriverPostgres
+import DBDriverSQLite
 import Foundation
 import Observation
 
 @Observable
 @MainActor
 final class AppModel {
-    /// Drivers with a working implementation; SQLite, Redis, DynamoDB follow.
+    /// Drivers with a working implementation; Redis, DynamoDB follow.
     static let availableDrivers: [DriverDescriptor] = [
         PostgresDriver.descriptor,
         MySQLDriver.descriptor,
         MongoDriver.descriptor,
+        SQLiteDriver.descriptor,
     ]
 
     var profiles: [ConnectionProfile] = []
@@ -156,6 +158,8 @@ final class AppModel {
             return try MySQLDriver(config: config)
         case MongoDriver.descriptor.id:
             return try MongoDriver(config: config)
+        case SQLiteDriver.descriptor.id:
+            return try SQLiteDriver(config: config)
         default:
             throw DBError(
                 kind: .unsupported,
@@ -399,12 +403,17 @@ final class QueryTab {
     private var runTask: Task<Void, Never>?
     private var cancelHandler: (@Sendable () async -> Void)?
 
-    var pageSize = 500
+    var pageSize: Int
     let language: DriverDescriptor.QueryLanguage
+
+    /// UserDefaults key for the streaming chunk size, set in Preferences.
+    static let pageSizeDefaultsKey = "queryPageSize"
 
     init(driver: any DatabaseDriver) {
         self.driver = driver
         self.language = type(of: driver).descriptor.queryLanguage
+        let stored = UserDefaults.standard.integer(forKey: Self.pageSizeDefaultsKey)
+        self.pageSize = stored > 0 ? stored : 500
     }
 
     /// True when linked to a saved query whose text differs from the editor.

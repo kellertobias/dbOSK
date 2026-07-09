@@ -15,6 +15,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/vapor/mysql-nio.git", from: "1.7.0"),
         .package(url: "https://github.com/orlandos-nl/MongoKitten.git", from: "7.9.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
     ],
     targets: [
         .target(name: "DBCore"),
@@ -41,19 +42,27 @@ let package = Package(
                 .product(name: "MongoKitten", package: "MongoKitten"),
             ]
         ),
+        .target(
+            name: "DBDriverSQLite",
+            dependencies: [
+                "DBCore",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
+        ),
         .target(name: "Connections", dependencies: ["DBCore"]),
         .target(name: "Export", dependencies: ["DBCore"]),
         .executableTarget(
             name: "Dbosk",
             dependencies: [
                 "DBCore", "DBDriverPostgres", "DBDriverMySQL", "DBDriverMongo",
-                "Connections", "Export",
+                "DBDriverSQLite", "Connections", "Export",
             ]
         ),
         .testTarget(name: "DBCoreTests", dependencies: ["DBCore"]),
         .testTarget(name: "DBDriverPostgresTests", dependencies: ["DBDriverPostgres"]),
         .testTarget(name: "DBDriverMySQLTests", dependencies: ["DBDriverMySQL"]),
         .testTarget(name: "DBDriverMongoTests", dependencies: ["DBDriverMongo"]),
+        .testTarget(name: "DBDriverSQLiteTests", dependencies: ["DBDriverSQLite"]),
         .testTarget(name: "ConnectionsTests", dependencies: ["Connections"]),
         .testTarget(name: "ExportTests", dependencies: ["Export"]),
     ]
