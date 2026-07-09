@@ -33,16 +33,72 @@ public struct TableMeta: Codable, Sendable, Hashable {
     }
 }
 
-/// Per-connection user metadata: saved queries plus table annotations.
-/// Stored as a sidecar JSON per profile, never in the connection itself.
+/// One executed query, recorded automatically.
+public struct QueryHistoryEntry: Codable, Sendable, Hashable, Identifiable {
+    public var id: UUID
+    public var text: String
+    public var executedAt: Date
+    public var succeeded: Bool
+
+    public init(id: UUID = UUID(), text: String, executedAt: Date, succeeded: Bool) {
+        self.id = id
+        self.text = text
+        self.executedAt = executedAt
+        self.succeeded = succeeded
+    }
+}
+
+/// Per-connection user metadata: saved queries, query history, and table
+/// annotations. Stored as a sidecar JSON per profile, never in the
+/// connection itself.
 public struct ConnectionMetadata: Codable, Sendable, Equatable {
+    /// Most queries the history keeps per connection.
+    public static let historyLimit = 100
+
     public var savedQueries: [SavedQuery]
+    /// Newest first, capped at `historyLimit`.
+    public var history: [QueryHistoryEntry]
     /// Keyed by `Self.key(for:)` of the table's namespace path.
     public var tables: [String: TableMeta]
 
-    public init(savedQueries: [SavedQuery] = [], tables: [String: TableMeta] = [:]) {
+    public init(
+        savedQueries: [SavedQuery] = [],
+        history: [QueryHistoryEntry] = [],
+        tables: [String: TableMeta] = [:]
+    ) {
         self.savedQueries = savedQueries
+        self.history = history
         self.tables = tables
+    }
+
+    // Custom decoding: `history` is absent in pre-history metadata files.
+    private enum CodingKeys: String, CodingKey {
+        case savedQueries, history, tables
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        savedQueries = try c.decodeIfPresent([SavedQuery].self, forKey: .savedQueries) ?? []
+        history = try c.decodeIfPresent([QueryHistoryEntry].self, forKey: .history) ?? []
+        tables = try c.decodeIfPresent([String: TableMeta].self, forKey: .tables) ?? [:]
+    }
+
+    /// Prepends an executed query. Re-running the newest entry updates it
+    /// in place instead of stacking duplicates; the list stays capped.
+    public mutating func recordHistory(text: String, succeeded: Bool, at date: Date = Date()) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let newest = history.first, newest.text == trimmed {
+            history[0].executedAt = date
+            history[0].succeeded = succeeded
+            return
+        }
+        history.insert(
+            QueryHistoryEntry(text: trimmed, executedAt: date, succeeded: succeeded),
+            at: 0)
+        if history.count > Self.historyLimit {
+            history.removeLast(history.count - Self.historyLimit)
+        }
     }
 
     public static func key(for path: [String]) -> String {

@@ -11,7 +11,10 @@ public final class PostgresDriver: DatabaseDriver, Sendable {
         queryLanguage: .sql,
         defaultPort: 5432,
         supportsStreaming: true,
-        supportsServerSideCancel: true
+        supportsServerSideCancel: true,
+        sqlDialect: .postgres,
+        supportsTableEditing: true,
+        supportsDDL: true
     )
 
     private let config: ResolvedConnectionConfig

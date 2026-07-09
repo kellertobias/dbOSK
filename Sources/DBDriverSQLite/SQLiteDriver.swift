@@ -9,7 +9,10 @@ public final class SQLiteDriver: DatabaseDriver, Sendable {
         queryLanguage: .sql,
         defaultPort: nil,
         supportsStreaming: true,
-        supportsServerSideCancel: true
+        supportsServerSideCancel: true,
+        sqlDialect: .sqlite,
+        supportsTableEditing: true,
+        supportsDDL: true
     )
 
     private let filePath: String
@@ -150,6 +153,13 @@ public final class SQLiteDriver: DatabaseDriver, Sendable {
             throw DBError(kind: .unsupported, message: "SQLite driver only accepts SQL")
         }
         return try await state.execute(sql: sql, pageSize: pageSize)
+    }
+
+    /// GRDB-native transaction: `execute()` runs inside `writeWithoutTransaction`,
+    /// so routing BEGIN/COMMIT through it (the protocol default) would leave a
+    /// transaction open across the block boundary and trip GRDB's fatal error.
+    public func executeBatch(_ statements: [String]) async throws -> [BatchStatementResult] {
+        try await state.executeBatch(statements)
     }
 
     private func quotedLiteral(_ value: String) -> String {

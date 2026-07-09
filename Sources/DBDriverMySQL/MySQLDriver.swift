@@ -14,7 +14,10 @@ public final class MySQLDriver: DatabaseDriver, Sendable {
         defaultPort: 3306,
         supportsStreaming: true,
         supportsServerSideCancel: true,
-        identifierQuote: "`"
+        identifierQuote: "`",
+        sqlDialect: .mysql,
+        supportsTableEditing: true,
+        supportsDDL: true
     )
 
     private let state: ConnectionActor

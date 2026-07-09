@@ -240,6 +240,16 @@ final class ConnectionSession: Identifiable {
         try? metadataStore.save(metadata, for: profile.id)
     }
 
+    func recordHistory(text: String, succeeded: Bool) {
+        metadata.recordHistory(text: text, succeeded: succeeded)
+        persistMetadata()
+    }
+
+    func clearHistory() {
+        metadata.history = []
+        persistMetadata()
+    }
+
     @discardableResult
     func saveQuery(named name: String, text: String) -> SavedQuery {
         let query = SavedQuery(name: name, text: text)
@@ -355,6 +365,9 @@ final class ConnectionSession: Identifiable {
         }
         let browser = TableBrowser(driver: driver)
         browser.displayMode = mode
+        browser.resultTab.onExecuted = { [weak self] text, succeeded in
+            self?.recordHistory(text: text, succeeded: succeeded)
+        }
         let tab = WorkTab(title: namespace.name, content: .table(browser))
         tabs.append(tab)
         selectedTabID = tab.id
@@ -370,6 +383,9 @@ final class ConnectionSession: Identifiable {
         let queryTab = QueryTab(driver: driver)
         queryTab.queryText = saved?.text ?? initialSQL
         queryTab.savedQuery = saved
+        queryTab.onExecuted = { [weak self] text, succeeded in
+            self?.recordHistory(text: text, succeeded: succeeded)
+        }
         let tab = WorkTab(title: "Query", content: .query(queryTab))
         tabs.append(tab)
         selectedTabID = tab.id
@@ -453,6 +469,10 @@ final class QueryTab {
         self.pageSize = stored > 0 ? stored : 500
     }
 
+    /// Invoked after each execution finishes (query text, success) — the
+    /// session hooks this to record history.
+    var onExecuted: ((String, Bool) -> Void)?
+
     /// True when linked to a saved query whose text differs from the editor.
     var hasUnsavedChanges: Bool {
         guard let savedQuery else { return false }
@@ -484,10 +504,13 @@ final class QueryTab {
                 self.runState = .done(
                     rowCount: self.rows.count,
                     elapsed: Date().timeIntervalSince(started))
+                self.onExecuted?(sql, true)
             } catch let error as DBError where error.kind == .cancelled {
                 self.runState = .cancelled
+                self.onExecuted?(sql, false)
             } catch {
                 self.runState = .failed(String(describing: error))
+                self.onExecuted?(sql, false)
             }
             self.cancelHandler = nil
         }

@@ -14,6 +14,13 @@ public struct DriverDescriptor: Sendable {
     /// Character wrapping identifiers in generated SQL ("\"" for standard SQL,
     /// "`" for MySQL). Empty for non-SQL drivers.
     public let identifierQuote: String
+    /// SQL dialect for generated DML/DDL and value literals. Nil for drivers
+    /// without structured write support.
+    public let sqlDialect: SQLDialect?
+    /// Staged row editing (insert/update/delete) in Table mode.
+    public let supportsTableEditing: Bool
+    /// Structured DDL (create/alter/drop table, create/drop index).
+    public let supportsDDL: Bool
 
     public init(
         id: String,
@@ -22,7 +29,10 @@ public struct DriverDescriptor: Sendable {
         defaultPort: Int?,
         supportsStreaming: Bool,
         supportsServerSideCancel: Bool,
-        identifierQuote: String = "\""
+        identifierQuote: String = "\"",
+        sqlDialect: SQLDialect? = nil,
+        supportsTableEditing: Bool = false,
+        supportsDDL: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -31,6 +41,9 @@ public struct DriverDescriptor: Sendable {
         self.supportsStreaming = supportsStreaming
         self.supportsServerSideCancel = supportsServerSideCancel
         self.identifierQuote = identifierQuote
+        self.sqlDialect = sqlDialect
+        self.supportsTableEditing = supportsTableEditing
+        self.supportsDDL = supportsDDL
     }
 
     /// Quotes an identifier for this driver's SQL dialect.
@@ -249,6 +262,40 @@ public struct QueryExecution: Sendable {
     }
 }
 
+// MARK: - Batch execution (staged edits, DDL)
+
+public struct BatchStatementResult: Sendable {
+    /// Affected-row count when the server reports one; nil for DDL or drivers
+    /// that don't surface counts (Postgres).
+    public let affectedCount: Int?
+
+    public init(affectedCount: Int?) {
+        self.affectedCount = affectedCount
+    }
+}
+
+/// Failure inside `executeBatch`: identifies the failing statement so the UI
+/// can point at the offending change.
+public struct BatchError: Error, Sendable, CustomStringConvertible {
+    /// Index into the submitted statements; `statements.count` means COMMIT failed.
+    public let statementIndex: Int
+    public let statement: String
+    public let underlying: DBError
+    /// Whether the transaction was rolled back (best effort for BEGIN/COMMIT drivers).
+    public let rolledBack: Bool
+
+    public init(statementIndex: Int, statement: String, underlying: DBError, rolledBack: Bool) {
+        self.statementIndex = statementIndex
+        self.statement = statement
+        self.underlying = underlying
+        self.rolledBack = rolledBack
+    }
+
+    public var description: String {
+        "Statement \(statementIndex + 1) failed: \(underlying.description)"
+    }
+}
+
 // MARK: - Errors
 
 public struct DBError: Error, Sendable, CustomStringConvertible {
@@ -300,6 +347,11 @@ public protocol DatabaseDriver: Sendable {
     /// Implementations must honor Task cancellation and perform a driver-level
     /// cancel (server-side where supported) via `QueryExecution.cancel`.
     func execute(_ query: DriverQuery, pageSize: Int) async throws -> QueryExecution
+
+    /// Executes statements atomically: all succeed or all roll back.
+    /// Defaults to BEGIN/COMMIT through `execute` (safe for single-connection
+    /// SQL drivers); SQLite overrides with a GRDB-native transaction.
+    func executeBatch(_ statements: [String]) async throws -> [BatchStatementResult]
 }
 
 extension DatabaseDriver {
@@ -310,5 +362,48 @@ extension DatabaseDriver {
                 ColumnDetail(name: $0.name, dbTypeName: $0.dbTypeName)
             },
             indexes: [])
+    }
+
+    public func executeBatch(_ statements: [String]) async throws -> [BatchStatementResult] {
+        guard Self.descriptor.queryLanguage == .sql else {
+            throw DBError(
+                kind: .unsupported,
+                message: "\(Self.descriptor.displayName) does not support batch execution")
+        }
+
+        /// Runs one statement to completion, returning its affected count.
+        @Sendable func run(_ sql: String) async throws -> Int? {
+            let execution = try await execute(.sql(sql), pageSize: 1000)
+            var affected: Int?
+            for try await chunk in execution.chunks {
+                if let count = chunk.affectedCount { affected = count }
+            }
+            return affected
+        }
+
+        func fail(at index: Int, statement: String, error: Error) async -> BatchError {
+            let rolledBack = (try? await run("ROLLBACK")) != nil
+            let dbError = error as? DBError
+                ?? DBError(kind: .queryFailed, message: String(describing: error))
+            return BatchError(
+                statementIndex: index, statement: statement,
+                underlying: dbError, rolledBack: rolledBack)
+        }
+
+        _ = try await run("BEGIN")
+        var results: [BatchStatementResult] = []
+        for (index, statement) in statements.enumerated() {
+            do {
+                results.append(BatchStatementResult(affectedCount: try await run(statement)))
+            } catch {
+                throw await fail(at: index, statement: statement, error: error)
+            }
+        }
+        do {
+            _ = try await run("COMMIT")
+        } catch {
+            throw await fail(at: statements.count, statement: "COMMIT", error: error)
+        }
+        return results
     }
 }

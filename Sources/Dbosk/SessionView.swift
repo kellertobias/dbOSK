@@ -643,6 +643,7 @@ struct QueryView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Spacer()
+                HistoryMenu(tab: tab, session: session)
                 saveControl
                 ExportMenu(tab: tab)
                 if tab.runState == .running || tab.runState == .streaming {
@@ -733,6 +734,55 @@ struct QueryView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+}
+
+// MARK: - Query history
+
+struct HistoryMenu: View {
+    @Bindable var tab: QueryTab
+    let session: ConnectionSession
+
+    var body: some View {
+        Menu {
+            if session.metadata.history.isEmpty {
+                Text("No queries yet")
+            }
+            ForEach(session.metadata.history.prefix(25)) { entry in
+                Button {
+                    tab.queryText = entry.text
+                } label: {
+                    Label {
+                        Text(title(for: entry))
+                    } icon: {
+                        Image(systemName: entry.succeeded
+                            ? "clock" : "exclamationmark.triangle")
+                    }
+                }
+                .help(entry.text)
+            }
+            if !session.metadata.history.isEmpty {
+                Divider()
+                Button("Clear History", role: .destructive) {
+                    session.clearHistory()
+                }
+            }
+        } label: {
+            Label("History", systemImage: "clock.arrow.circlepath")
+        }
+        .help("Recent queries on this connection")
+    }
+
+    private func title(for entry: QueryHistoryEntry) -> String {
+        let compact = entry.text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(
+                of: #"\s+"#, with: " ", options: .regularExpression)
+        let text = compact.count > 60
+            ? String(compact.prefix(60)) + "…" : compact
+        let when = entry.executedAt.formatted(
+            .relative(presentation: .named, unitsStyle: .narrow))
+        return "\(text)   ·   \(when)"
     }
 }
 
