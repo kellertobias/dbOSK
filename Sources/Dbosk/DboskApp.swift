@@ -1,8 +1,17 @@
+import AppKit
 import SwiftUI
 
 @main
 struct DboskApp: App {
     @State private var appModel = AppModel()
+
+    init() {
+        // When launched as a bare executable (swift run) there is no app bundle,
+        // so AppKit starts us as a background process: windows can't become key
+        // and text fields won't accept input. Force regular-app behavior.
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
 
     var body: some Scene {
         WindowGroup {

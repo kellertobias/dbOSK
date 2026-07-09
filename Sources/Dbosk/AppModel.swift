@@ -7,6 +7,11 @@ import Observation
 @Observable
 @MainActor
 final class AppModel {
+    /// Drivers with a working implementation; MySQL, MongoDB, SQLite follow.
+    static let availableDrivers: [DriverDescriptor] = [
+        PostgresDriver.descriptor
+    ]
+
     var profiles: [ConnectionProfile] = []
     var activeSession: ConnectionSession?
     var connectionError: String?

@@ -1,5 +1,6 @@
 import Connections
 import DBCore
+import DBDriverPostgres
 import SwiftUI
 
 struct ConnectionListView: View {
@@ -73,6 +74,7 @@ struct ConnectionEditView: View {
 
     let profile: ConnectionProfile?
 
+    @State private var driverID = PostgresDriver.descriptor.id
     @State private var name = ""
     @State private var host = "localhost"
     @State private var port = ""
@@ -96,9 +98,14 @@ struct ConnectionEditView: View {
                 .font(.title2)
 
             Form {
+                Picker("Database", selection: $driverID) {
+                    ForEach(AppModel.availableDrivers, id: \.id) { descriptor in
+                        Text(descriptor.displayName).tag(descriptor.id)
+                    }
+                }
                 TextField("Name", text: $name)
                 TextField("Host", text: $host)
-                TextField("Port", text: $port)
+                TextField("Port", text: $port, prompt: Text(defaultPortPrompt))
                     .frame(maxWidth: 120)
                 TextField("User", text: $user)
                 TextField("Database", text: $database)
@@ -140,8 +147,15 @@ struct ConnectionEditView: View {
         .onAppear { populate() }
     }
 
+    private var defaultPortPrompt: String {
+        let port = AppModel.availableDrivers
+            .first { $0.id == driverID }?.defaultPort
+        return port.map(String.init) ?? ""
+    }
+
     private func populate() {
         guard let profile else { return }
+        driverID = profile.driverID
         name = profile.name
         host = profile.host ?? ""
         port = profile.port.map(String.init) ?? ""
@@ -173,7 +187,7 @@ struct ConnectionEditView: View {
         let updated = ConnectionProfile(
             id: profile?.id ?? UUID(),
             name: name,
-            driverID: "postgres",
+            driverID: driverID,
             host: host.isEmpty ? nil : host,
             port: Int(port),
             user: user.isEmpty ? nil : user,
