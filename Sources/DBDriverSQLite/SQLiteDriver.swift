@@ -282,6 +282,34 @@ private actor ConnectionActor {
         return QueryExecution(columns: columns, chunks: stream, cancel: cancel)
     }
 
+    func executeBatch(_ statements: [String]) async throws -> [BatchStatementResult] {
+        let queue = try requireQueue()
+        do {
+            // queue.write wraps the block in a transaction and rolls back on throw.
+            return try await queue.write { db in
+                var results: [BatchStatementResult] = []
+                for (index, sql) in statements.enumerated() {
+                    do {
+                        try db.execute(sql: sql)
+                        results.append(BatchStatementResult(
+                            affectedCount: db.changesCount > 0 ? db.changesCount : nil))
+                    } catch {
+                        throw BatchError(
+                            statementIndex: index,
+                            statement: sql,
+                            underlying: Self.queryError(error),
+                            rolledBack: true)
+                    }
+                }
+                return results
+            }
+        } catch let error as BatchError {
+            throw error
+        } catch {
+            throw Self.queryError(error)
+        }
+    }
+
     private static func queryError(_ error: Error) -> DBError {
         if let dbError = error as? DBError { return dbError }
         if let databaseError = error as? DatabaseError {

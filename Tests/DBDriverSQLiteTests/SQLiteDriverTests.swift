@@ -203,6 +203,71 @@ import Testing
         }
     }
 
+    @Test func executeBatchCommitsAtomically() async throws {
+        let driver = try makeDriver(try makeDatabase())
+        try await driver.connect()
+
+        let results = try await driver.executeBatch([
+            "UPDATE people SET score = -1 WHERE id <= 5",
+            "DELETE FROM people WHERE id = 6",
+            "INSERT INTO people (name, score) VALUES ('batch', 9.5)",
+        ])
+        #expect(results.count == 3)
+        #expect(results[0].affectedCount == 5)
+        #expect(results[1].affectedCount == 1)
+        #expect(results[2].affectedCount == 1)
+
+        let rows = try await collectAll(try await driver.execute(
+            .sql("SELECT count(*) FROM people WHERE score = -1 OR name = 'batch'"),
+            pageSize: 10))
+        #expect(rows[0].values[0] == .int(6))
+        await driver.disconnect()
+    }
+
+    @Test func executeBatchRollsBackOnFailure() async throws {
+        let driver = try makeDriver(try makeDatabase())
+        try await driver.connect()
+
+        var batchError: BatchError?
+        do {
+            _ = try await driver.executeBatch([
+                "UPDATE people SET score = -1 WHERE id = 1",
+                "INSERT INTO people (id, name) VALUES (1, 'dupe')",  // PK violation
+            ])
+        } catch let error as BatchError {
+            batchError = error
+        }
+        #expect(batchError?.statementIndex == 1)
+        #expect(batchError?.rolledBack == true)
+
+        // First statement must have been rolled back too.
+        let rows = try await collectAll(try await driver.execute(
+            .sql("SELECT count(*) FROM people WHERE score = -1"), pageSize: 10))
+        #expect(rows[0].values[0] == .int(0))
+        await driver.disconnect()
+    }
+
+    @Test func executeBatchRunsDDL() async throws {
+        let driver = try makeDriver(try makeDatabase())
+        try await driver.connect()
+
+        _ = try await driver.executeBatch([
+            """
+            CREATE TABLE tags (
+              "id" INTEGER PRIMARY KEY,
+              "label" TEXT NOT NULL
+            )
+            """,
+            #"CREATE UNIQUE INDEX "idx_tags_label" ON "tags" ("label")"#,
+        ])
+        let structure = try await driver.describeTable(
+            Namespace(path: ["tags"], kind: .table(.table), isExpandable: false))
+        #expect(structure.columns.map(\.name) == ["id", "label"])
+        #expect(structure.columns[0].isPrimaryKey)
+        #expect(structure.indexes.contains { $0.name == "idx_tags_label" && $0.isUnique })
+        await driver.disconnect()
+    }
+
     @Test func dmlReportsAffectedCount() async throws {
         let driver = try makeDriver(try makeDatabase())
         try await driver.connect()
