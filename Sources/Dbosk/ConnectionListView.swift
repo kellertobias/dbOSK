@@ -21,6 +21,7 @@ extension ColorTag {
 
 struct ConnectionListView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.openWindow) private var openWindow
     @State private var editingProfile: ConnectionProfile?
     @State private var showingNewProfile = false
 
@@ -85,8 +86,12 @@ struct ConnectionListView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Connect") {
-                Task { await appModel.connect(to: profile) }
+            Button(appModel.sessions[profile.id] != nil ? "Open" : "Connect") {
+                Task {
+                    if await appModel.connect(to: profile) {
+                        openWindow(value: profile.id)
+                    }
+                }
             }
             .disabled(appModel.isConnecting)
         }

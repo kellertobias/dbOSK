@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SessionView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
     @Bindable var session: ConnectionSession
 
     var body: some View {
@@ -29,7 +30,8 @@ struct SessionView: View {
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
-                    appModel.disconnect()
+                    appModel.disconnect(profileID: session.profile.id)
+                    dismiss()
                 } label: {
                     Label("Disconnect", systemImage: "xmark.circle")
                 }

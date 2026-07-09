@@ -92,7 +92,6 @@ struct MongoDriverIntegrationTests {
     @Test func findStreamsAndMapsDocuments() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
         try await seed(driver)
 
         let execution = try await driver.execute(
@@ -125,7 +124,6 @@ struct MongoDriverIntegrationTests {
     @Test func skipAndLimitPaginate() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
         try await seed(driver)
 
         let execution = try await driver.execute(
@@ -142,7 +140,6 @@ struct MongoDriverIntegrationTests {
     @Test func aggregateAndCount() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
         try await seed(driver)
 
         let aggregate = try await driver.execute(
@@ -160,10 +157,42 @@ struct MongoDriverIntegrationTests {
         #expect(countRows[0].values[0] == .int(250))
     }
 
+    @Test func cancelStopsCursorIteration() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+
+        // Seed a larger collection so cancellation lands mid-cursor.
+        let db = try await MongoKitten.MongoDatabase.connect(
+            to: "mongodb://localhost:27019/dbosk_test")
+        try await db["bulk"].drop()
+        for batch in 0..<10 {
+            var documents: [BSON.Document] = []
+            for index in 0..<2000 {
+                documents.append(["n": batch * 2000 + index, "payload": String(repeating: "x", count: 200)])
+            }
+            _ = try await db["bulk"].insertMany(documents)
+        }
+
+        let execution = try await driver.execute(
+            .sql("db.bulk.find({})"), pageSize: 100)
+        var rowsSeen = 0
+        do {
+            for try await chunk in execution.chunks {
+                rowsSeen += chunk.rows.count
+                if rowsSeen >= 300 {
+                    await execution.cancel()
+                }
+            }
+        } catch let error as DBError {
+            #expect(error.kind == .cancelled)
+        }
+        #expect(rowsSeen < 20000)
+        await driver.disconnect()
+    }
+
     @Test func listsDatabasesCollectionsAndFields() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
         try await seed(driver)
 
         let databases = try await driver.listNamespaces(parent: nil)

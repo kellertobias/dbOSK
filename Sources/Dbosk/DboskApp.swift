@@ -14,22 +14,38 @@ struct DboskApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // Launcher window with the connection list.
+        Window("Connections", id: "connections") {
+            ConnectionListView()
+                .environment(appModel)
+        }
+        .windowToolbarStyle(.unified)
+
+        // One window per live connection; native window tabbing applies.
+        WindowGroup(for: UUID.self) { $profileID in
+            SessionWindowView(profileID: profileID)
                 .environment(appModel)
         }
         .windowToolbarStyle(.unified)
     }
 }
 
-struct ContentView: View {
+struct SessionWindowView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.dismiss) private var dismiss
+    let profileID: UUID?
 
     var body: some View {
-        if let session = appModel.activeSession {
+        if let profileID, let session = appModel.sessions[profileID] {
             SessionView(session: session)
         } else {
-            ConnectionListView()
+            ContentUnavailableView(
+                "Disconnected", systemImage: "bolt.slash",
+                description: Text("This connection was closed."))
+                .onAppear {
+                    // Window restored without a live session — close it.
+                    if profileID == nil { dismiss() }
+                }
         }
     }
 }

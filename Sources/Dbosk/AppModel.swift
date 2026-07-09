@@ -17,7 +17,8 @@ final class AppModel {
     ]
 
     var profiles: [ConnectionProfile] = []
-    var activeSession: ConnectionSession?
+    /// Live sessions keyed by profile id; each gets its own window.
+    var sessions: [UUID: ConnectionSession] = [:]
     var connectionError: String?
     var isConnecting = false
 
@@ -55,7 +56,10 @@ final class AppModel {
         saveProfiles()
     }
 
-    func connect(to profile: ConnectionProfile) async {
+    /// Connects and registers a session; returns true so the caller can open
+    /// the session window. Reuses an existing live session for the profile.
+    func connect(to profile: ConnectionProfile) async -> Bool {
+        if sessions[profile.id] != nil { return true }
         isConnecting = true
         connectionError = nil
         defer { isConnecting = false }
@@ -63,15 +67,16 @@ final class AppModel {
             let config = try await resolver.resolve(profile)
             let driver = try makeDriver(profile: profile, config: config)
             try await driver.connect()
-            activeSession = ConnectionSession(profile: profile, driver: driver)
+            sessions[profile.id] = ConnectionSession(profile: profile, driver: driver)
+            return true
         } catch {
             connectionError = String(describing: error)
+            return false
         }
     }
 
-    func disconnect() {
-        let session = activeSession
-        activeSession = nil
+    func disconnect(profileID: UUID) {
+        let session = sessions.removeValue(forKey: profileID)
         Task { await session?.driver.disconnect() }
     }
 
@@ -346,34 +351,18 @@ final class TableBrowser {
 
     var builtQuery: String? {
         guard let table else { return nil }
-        let condition = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if descriptor.queryLanguage == .mongo {
-            // Filter field holds a JSON document for Mongo collections.
-            var query = "db.\(table.path.joined(separator: ".")).find(\(condition.isEmpty ? "{}" : condition))"
-            if offset > 0 { query += ".skip(\(max(offset, 0)))" }
-            query += ".limit(\(max(limit, 1)))"
-            return query
-        }
-
-        let target = table.path.map { descriptor.quoted($0) }.joined(separator: ".")
-        let columns: String
-        if selectedColumns.isEmpty {
-            columns = "*"
-        } else {
-            // Preserve table column order rather than selection order.
-            columns = availableColumns
-                .map(\.name)
-                .filter { selectedColumns.contains($0) }
-                .map { descriptor.quoted($0) }
-                .joined(separator: ", ")
-        }
-        var sql = "SELECT \(columns) FROM \(target)"
-        if !condition.isEmpty {
-            sql += " WHERE \(condition)"
-        }
-        sql += " LIMIT \(max(limit, 1)) OFFSET \(max(offset, 0))"
-        return sql
+        // Preserve table column order rather than selection order.
+        let columns = selectedColumns.isEmpty
+            ? []
+            : availableColumns.map(\.name).filter { selectedColumns.contains($0) }
+        return TableQueryBuilder.build(
+            TableQueryBuilder.Request(
+                table: table,
+                columns: columns,
+                filter: whereClause,
+                offset: offset,
+                limit: limit),
+            for: descriptor)
     }
 
     func load() {

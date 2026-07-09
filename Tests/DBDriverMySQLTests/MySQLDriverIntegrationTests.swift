@@ -30,7 +30,6 @@ struct MySQLDriverIntegrationTests {
     @Test func connectAndSelectTypes() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let execution = try await driver.execute(
             .sql("""
@@ -58,12 +57,12 @@ struct MySQLDriverIntegrationTests {
         }
         #expect(doc["a"] == .array([.int(1), .int(2)]))
         #expect(doc["b"] == .document(["c": .bool(true)]))
+        await driver.disconnect()
     }
 
     @Test func streamsLargeResultInChunks() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let setup = try await driver.execute(
             .sql("SET SESSION cte_max_recursion_depth = 20000"), pageSize: 10)
@@ -88,12 +87,50 @@ struct MySQLDriverIntegrationTests {
         }
         #expect(rowCount == 10000)
         #expect(chunkCount >= 20)
+        await driver.disconnect()
+    }
+
+    @Test func cancelStopsARunningQuery() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+
+        let setup = try await driver.execute(
+            .sql("SET SESSION cte_max_recursion_depth = 100000000"), pageSize: 10)
+        _ = try? await collectAll(setup)
+
+        // Would produce 100M rows; must be stopped by KILL QUERY + producer cancel.
+        let execution = try await driver.execute(
+            .sql("""
+                WITH RECURSIVE seq(i) AS (
+                    SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < 100000000
+                )
+                SELECT i, MD5(i) FROM seq
+                """),
+            pageSize: 100)
+
+        let started = Date()
+        var rowsSeen = 0
+        do {
+            for try await chunk in execution.chunks {
+                rowsSeen += chunk.rows.count
+                if rowsSeen >= 200 {
+                    await execution.cancel()
+                }
+            }
+        } catch let error as DBError {
+            // Either our cancellation or the server's interrupt error is fine.
+            #expect(error.kind == .cancelled || error.kind == .queryFailed)
+        }
+        #expect(Date().timeIntervalSince(started) < 15)
+        #expect(rowsSeen < 100_000_000)
+        // Deterministic teardown: the killed connection is in a dirty state and
+        // must be closed before the test process exits, or NIO crashes at exit.
+        await driver.disconnect()
     }
 
     @Test func queryErrorSurfacesServerMessage() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let execution = try? await driver.execute(
             .sql("SELECT * FROM does_not_exist"), pageSize: 10)
@@ -107,12 +144,12 @@ struct MySQLDriverIntegrationTests {
             failed = true
         }
         #expect(failed)
+        await driver.disconnect()
     }
 
     @Test func listsDatabasesTablesAndColumns() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let setup = try await driver.execute(
             .sql("CREATE TABLE IF NOT EXISTS dbosk_smoke (id INT PRIMARY KEY, note TEXT)"),
@@ -130,5 +167,6 @@ struct MySQLDriverIntegrationTests {
         let columns = try await driver.listColumns(of: smoke!)
         #expect(columns.map(\.name) == ["id", "note"])
         #expect(columns[0].dbTypeName == "int")
+        await driver.disconnect()
     }
 }

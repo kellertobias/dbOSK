@@ -32,7 +32,6 @@ struct PostgresDriverIntegrationTests {
     @Test func connectAndSelectTypes() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let execution = try await driver.execute(
             .sql("""
@@ -61,12 +60,12 @@ struct PostgresDriverIntegrationTests {
         }
         #expect(doc["a"] == .array([.int(1), .int(2)]))
         #expect(doc["b"] == .document(["c": .bool(true)]))
+        await driver.disconnect()
     }
 
     @Test func streamsLargeResultInChunks() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         let execution = try await driver.execute(
             .sql("SELECT i, md5(i::text) FROM generate_series(1, 10000) AS s(i)"),
@@ -81,12 +80,12 @@ struct PostgresDriverIntegrationTests {
         }
         #expect(rowCount == 10000)
         #expect(chunkCount >= 20)
+        await driver.disconnect()
     }
 
     @Test func cancelStopsARunningQuery() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         // A query that would take far longer than the test timeout.
         let execution = try await driver.execute(
@@ -107,12 +106,12 @@ struct PostgresDriverIntegrationTests {
         }
         #expect(Date().timeIntervalSince(started) < 10)
         #expect(rowsSeen < 100_000_000)
+        await driver.disconnect()
     }
 
     @Test func queryErrorSurfacesServerMessage() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         await #expect {
             _ = try await driver.execute(.sql("SELECT * FROM does_not_exist"), pageSize: 10)
@@ -121,12 +120,12 @@ struct PostgresDriverIntegrationTests {
             return dbError.kind == .queryFailed
                 && dbError.message.contains("does_not_exist")
         }
+        await driver.disconnect()
     }
 
     @Test func listsSchemasAndTables() async throws {
         let driver = try makeDriver()
         try await driver.connect()
-        defer { Task { await driver.disconnect() } }
 
         // Ensure at least one table exists.
         let setup = try await driver.execute(
@@ -145,5 +144,6 @@ struct PostgresDriverIntegrationTests {
         let columns = try await driver.listColumns(of: smoke!)
         #expect(columns.map(\.name) == ["id", "note"])
         #expect(columns[0].dbTypeName == "integer")
+        await driver.disconnect()
     }
 }

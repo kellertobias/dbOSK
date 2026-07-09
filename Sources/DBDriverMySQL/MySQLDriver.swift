@@ -93,6 +93,9 @@ private actor ConnectionActor {
     private var connection: MySQLConnection?
     /// Server thread id of our connection, used for KILL QUERY.
     private var threadID: Int?
+    /// In-flight streaming query, tracked so cancellation can wait for the
+    /// command to fully unwind before the connection is touched again.
+    private var currentQuery: EventLoopFuture<Void>?
 
     init(config: ResolvedConnectionConfig) {
         self.config = config
@@ -164,15 +167,36 @@ private actor ConnectionActor {
         connection = nil
     }
 
-    private func requireConnection() throws -> MySQLConnection {
+    /// Returns the live connection, transparently reconnecting if it was
+    /// discarded (e.g. after a KILL QUERY left it in a dirty state).
+    private func requireConnection() async throws -> MySQLConnection {
+        if let connection { return connection }
+        try await connect()
         guard let connection else {
             throw DBError(kind: .connectionFailed, message: "Not connected")
         }
         return connection
     }
 
+    /// Kills the running query server-side, waits for the interrupted command
+    /// to unwind (closing the channel mid-command races MySQLNIO's internal
+    /// command queue), then discards the connection; the next query reconnects.
+    func killCurrentQuery() async {
+        guard let threadID else { return }
+        if let side = try? await Self.open(config: config, logger: logger) {
+            _ = try? await side.query("KILL QUERY \(threadID)").get()
+            try? await side.close().get()
+        }
+        if let currentQuery {
+            _ = try? await currentQuery.get()
+        }
+        currentQuery = nil
+        try? await connection?.close().get()
+        connection = nil
+    }
+
     func collect(_ sql: String, binds: [MySQLData]) async throws -> [[DBValue]] {
-        let connection = try requireConnection()
+        let connection = try await requireConnection()
         do {
             let rows = try await connection.query(sql, binds).get()
             return rows.map { row in
@@ -187,10 +211,7 @@ private actor ConnectionActor {
     }
 
     func execute(sql: String, pageSize: Int) async throws -> QueryExecution {
-        let connection = try requireConnection()
-        let config = self.config
-        let logger = self.logger
-        let threadID = self.threadID
+        let connection = try await requireConnection()
 
         // MySQLNIO delivers rows via callback with no flow control, so rows are
         // buffered into an unbounded stream. Server-side KILL QUERY is the only
@@ -204,6 +225,7 @@ private actor ConnectionActor {
             onRow: { row in rowContinuation.yield(row) },
             onMetadata: { metadata in affected.set(Int(metadata.affectedRows)) }
         )
+        currentQuery = queryFuture
         queryFuture.whenComplete { result in
             switch result {
             case .success: rowContinuation.finish()
@@ -265,14 +287,9 @@ private actor ConnectionActor {
             }
         }
 
-        let cancel: @Sendable () async -> Void = {
+        let cancel: @Sendable () async -> Void = { [weak self] in
             producer.cancel()
-            // Server-side kill via a short-lived side connection.
-            guard let threadID else { return }
-            if let side = try? await Self.open(config: config, logger: logger) {
-                _ = try? await side.query("KILL QUERY \(threadID)").get()
-                try? await side.close().get()
-            }
+            await self?.killCurrentQuery()
         }
         continuation.onTermination = { _ in producer.cancel() }
 
