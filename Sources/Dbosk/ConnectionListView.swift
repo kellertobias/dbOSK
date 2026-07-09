@@ -3,22 +3,6 @@ import DBCore
 import DBDriverPostgres
 import SwiftUI
 
-extension ColorTag {
-    var color: Color {
-        switch self {
-        case .red: return .red
-        case .orange: return .orange
-        case .yellow: return .yellow
-        case .green: return .green
-        case .blue: return .blue
-        case .purple: return .purple
-        case .gray: return .gray
-        }
-    }
-
-    var displayName: String { rawValue.capitalized }
-}
-
 struct ConnectionListView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.openWindow) private var openWindow
@@ -76,11 +60,13 @@ struct ConnectionListView: View {
 
     private func row(for profile: ConnectionProfile) -> some View {
         HStack {
-            Circle()
-                .fill(profile.colorTag?.color ?? Color.secondary.opacity(0.25))
-                .frame(width: 10, height: 10)
-            VStack(alignment: .leading) {
-                Text(profile.name).font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.headline)
+                    if let label = appModel.label(for: profile) {
+                        LabelBadge(label: label)
+                    }
+                }
                 Text(subtitle(for: profile))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -120,7 +106,7 @@ struct ConnectionEditView: View {
     @State private var driverID = PostgresDriver.descriptor.id
     @State private var name = ""
     @State private var groupName = ""
-    @State private var colorTag: ColorTag?
+    @State private var labelID: UUID?
     @State private var host = "localhost"
     @State private var port = ""
     @State private var user = ""
@@ -163,12 +149,16 @@ struct ConnectionEditView: View {
                         .frame(width: 24)
                     }
                 }
-                LabeledContent("Color") {
+                LabeledContent("Label") {
                     HStack(spacing: 8) {
-                        colorSwatch(nil)
-                        ForEach(ColorTag.allCases, id: \.self) { tag in
-                            colorSwatch(tag)
+                        Picker("Label", selection: $labelID) {
+                            Text("None").tag(UUID?.none)
+                            ForEach(appModel.labels) { label in
+                                Text(label.name).tag(UUID?.some(label.id))
+                            }
                         }
+                        .labelsHidden()
+                        SettingsLink { Text("Manage…") }
                     }
                 }
                 TextField("Host", text: $host)
@@ -218,30 +208,6 @@ struct ConnectionEditView: View {
         Array(Set(appModel.profiles.compactMap(\.groupName))).sorted()
     }
 
-    private func colorSwatch(_ tag: ColorTag?) -> some View {
-        Button {
-            colorTag = tag
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(tag?.color ?? Color.secondary.opacity(0.25))
-                    .frame(width: 16, height: 16)
-                if tag == nil {
-                    Image(systemName: "slash.circle")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .overlay {
-                if colorTag == tag {
-                    Circle().strokeBorder(Color.primary, lineWidth: 2)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .help(tag?.displayName ?? "None")
-    }
-
     private var defaultPortPrompt: String {
         let port = AppModel.availableDrivers
             .first { $0.id == driverID }?.defaultPort
@@ -253,7 +219,7 @@ struct ConnectionEditView: View {
         driverID = profile.driverID
         name = profile.name
         groupName = profile.groupName ?? ""
-        colorTag = profile.colorTag
+        labelID = profile.labelID
         host = profile.host ?? ""
         port = profile.port.map(String.init) ?? ""
         user = profile.user ?? ""
@@ -286,7 +252,7 @@ struct ConnectionEditView: View {
             name: name,
             groupName: groupName.trimmingCharacters(in: .whitespaces).isEmpty
                 ? nil : groupName.trimmingCharacters(in: .whitespaces),
-            colorTag: colorTag,
+            labelID: labelID,
             driverID: driverID,
             host: host.isEmpty ? nil : host,
             port: Int(port),

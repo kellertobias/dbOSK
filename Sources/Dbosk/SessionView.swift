@@ -1,4 +1,5 @@
 import AppKit
+import Connections
 import DBCore
 import Export
 import SwiftUI
@@ -11,9 +12,9 @@ struct SessionView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Always-visible environment stripe (e.g. red = production).
-            if let tag = session.profile.colorTag {
+            if let label = appModel.label(for: session.profile) {
                 Rectangle()
-                    .fill(tag.color)
+                    .fill(label.colorTag.color)
                     .frame(height: 3)
             }
             NavigationSplitView {
@@ -38,14 +39,9 @@ struct SessionView: View {
                     Label("Disconnect", systemImage: "xmark.circle")
                 }
             }
-            if let tag = session.profile.colorTag {
+            if let label = appModel.label(for: session.profile) {
                 ToolbarItem(placement: .status) {
-                    Label {
-                        Text(session.profile.groupName ?? session.profile.name)
-                    } icon: {
-                        Circle().fill(tag.color).frame(width: 10, height: 10)
-                    }
-                    .labelStyle(.titleAndIcon)
+                    LabelBadge(label: label)
                 }
             }
         }
@@ -57,9 +53,9 @@ struct SessionView: View {
         if let tab = session.selectedTab {
             switch tab.content {
             case .query(let queryTab):
-                QueryView(tab: queryTab)
+                QueryView(tab: queryTab, session: session)
             case .table(let browser):
-                TableModeView(browser: browser)
+                TableModeView(browser: browser, session: session)
             }
         } else {
             ContentUnavailableView(
@@ -132,28 +128,126 @@ struct TabBarView: View {
 
 struct SidebarView: View {
     @Bindable var session: ConnectionSession
-    @State private var hoveredNodeID: DBCore.Namespace.ID?
+    @State private var hoveredNodeID: String?
+    @State private var noteTarget: DBCore.Namespace?
+    @State private var groupTarget: DBCore.Namespace?
+    @State private var newGroupName = ""
 
     var body: some View {
         List {
             if let error = session.sidebarError {
                 Text(error).foregroundStyle(.red).font(.caption)
             }
-            OutlineGroup(
-                session.rootNamespaces.map { NamespaceNode(namespace: $0, session: session) },
-                children: \.children
-            ) { node in
-                row(for: node)
+            if !session.metadata.savedQueries.isEmpty {
+                Section("Saved Queries") {
+                    ForEach(session.metadata.savedQueries) { saved in
+                        savedQueryRow(saved)
+                    }
+                }
             }
+            Section {
+                OutlineGroup(
+                    session.rootNamespaces.map {
+                        SidebarNode(kind: .namespace($0, parent: nil), session: session)
+                    },
+                    children: \.children
+                ) { node in
+                    row(for: node)
+                }
+            } header: {
+                HStack {
+                    Text(session.profile.database ?? "Objects")
+                    Spacer()
+                    if !session.metadata.tables.filter(\.value.hidden).isEmpty {
+                        Button {
+                            session.showHiddenTables.toggle()
+                        } label: {
+                            Image(systemName: session.showHiddenTables
+                                ? "eye" : "eye.slash")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(session.showHiddenTables
+                            ? "Showing hidden tables" : "Show hidden tables")
+                    }
+                }
+            }
+        }
+        .sheet(item: $noteTarget) { namespace in
+            NoteEditorView(session: session, namespace: namespace)
+        }
+        .alert("New Group", isPresented: groupAlertShown) {
+            TextField("Group name", text: $newGroupName)
+            Button("Cancel", role: .cancel) { groupTarget = nil }
+            Button("Create") {
+                if let target = groupTarget, !newGroupName.isEmpty {
+                    session.setGroup(newGroupName, for: target)
+                }
+                groupTarget = nil
+                newGroupName = ""
+            }
+        } message: {
+            Text("Group tables within their schema in the sidebar.")
         }
     }
 
-    private func row(for node: NamespaceNode) -> some View {
-        HStack {
-            Label(node.namespace.name, systemImage: node.icon)
+    private var groupAlertShown: Binding<Bool> {
+        Binding(
+            get: { groupTarget != nil },
+            set: { if !$0 { groupTarget = nil } })
+    }
+
+    private func savedQueryRow(_ saved: SavedQuery) -> some View {
+        Label(saved.name, systemImage: "bookmark")
+            .contentShape(Rectangle())
+            .onTapGesture {
+                session.openQueryTab(initialSQL: saved.text)
+            }
+            .help(saved.text)
+            .contextMenu {
+                Button("Open") { session.openQueryTab(initialSQL: saved.text) }
+                Button("Run") {
+                    session.openQueryTab(initialSQL: saved.text, runImmediately: true)
+                }
+                Divider()
+                Button("Delete", role: .destructive) {
+                    session.deleteSavedQuery(saved)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private func row(for node: SidebarNode) -> some View {
+        switch node.kind {
+        case .group(let name, _):
+            Label(name, systemImage: "folder.fill")
+                .foregroundStyle(.secondary)
+        case .namespace(let namespace, let parent):
+            namespaceRow(namespace, parent: parent, nodeID: node.id)
+        }
+    }
+
+    private func namespaceRow(
+        _ namespace: DBCore.Namespace, parent: DBCore.Namespace?, nodeID: String
+    ) -> some View {
+        let isHidden = session.isHidden(namespace)
+        let note = session.note(for: namespace)
+        return HStack(spacing: 4) {
+            Label(namespace.name, systemImage: SidebarNode.icon(for: namespace))
+                .foregroundStyle(isHidden ? .tertiary : .primary)
+            if note != nil {
+                Image(systemName: "note.text")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if isHidden {
+                Image(systemName: "eye.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             Spacer()
             // Raw-query shortcut on database/schema nodes.
-            if node.namespace.isExpandable, hoveredNodeID == node.id {
+            if namespace.isExpandable, hoveredNodeID == nodeID {
                 Button {
                     session.openQueryTab()
                 } label: {
@@ -166,51 +260,127 @@ struct SidebarView: View {
                                 .fill(Color.accentColor.opacity(0.2)))
                 }
                 .buttonStyle(.borderless)
-                .help("New query on \(node.namespace.name)")
+                .help("New query on \(namespace.name)")
             }
         }
+        .help(note ?? "")
         .contentShape(Rectangle())
         .onHover { hovering in
-            hoveredNodeID = hovering ? node.id : nil
+            hoveredNodeID = hovering ? nodeID : nil
         }
         .onTapGesture {
-            if case .table = node.namespace.kind {
-                session.openTable(node.namespace)
+            if case .table = namespace.kind {
+                session.openTable(namespace)
             }
         }
         .contextMenu {
-            if case .table = node.namespace.kind {
-                Button("Open Table") { session.openTable(node.namespace) }
-                Button("Query Table") {
-                    session.openQueryTab(
-                        initialSQL: node.defaultQuery, runImmediately: true)
-                }
+            if case .table = namespace.kind {
+                tableContextMenu(namespace, parent: parent)
             } else {
                 Button("New Query") { session.openQueryTab() }
+                Button("Show All Tables") { session.unhideAll(in: namespace) }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func tableContextMenu(
+        _ namespace: DBCore.Namespace, parent: DBCore.Namespace?
+    ) -> some View {
+        Button("Open Table") { session.openTable(namespace) }
+        Button("Query Table") {
+            session.openQueryTab(
+                initialSQL: SidebarNode.defaultQuery(for: namespace, in: session),
+                runImmediately: true)
+        }
+        Divider()
+        Button(session.note(for: namespace) == nil ? "Add Note…" : "Edit Note…") {
+            noteTarget = namespace
+        }
+        Menu("Group") {
+            ForEach(session.metadata.groupNames, id: \.self) { group in
+                Button {
+                    session.setGroup(group, for: namespace)
+                } label: {
+                    if session.group(for: namespace) == group {
+                        Label(group, systemImage: "checkmark")
+                    } else {
+                        Text(group)
+                    }
+                }
+            }
+            if !session.metadata.groupNames.isEmpty { Divider() }
+            Button("New Group…") { groupTarget = namespace }
+            if session.group(for: namespace) != nil {
+                Button("Remove from Group") { session.setGroup(nil, for: namespace) }
+            }
+        }
+        Divider()
+        Button(session.isHidden(namespace) ? "Unhide Table" : "Hide Table") {
+            session.setHidden(!session.isHidden(namespace), for: namespace)
+        }
+        if let parent {
+            Button("Only Show This Table") {
+                session.hideOthers(than: namespace, in: parent)
+            }
+            Button("Show All Tables") { session.unhideAll(in: parent) }
         }
     }
 }
 
-/// Adapter making lazy namespace loading work with OutlineGroup.
+/// Sidebar tree node: a real namespace or a user-defined table group.
 @MainActor
-struct NamespaceNode: @MainActor Identifiable {
-    let namespace: DBCore.Namespace
-    let session: ConnectionSession
-
-    var id: DBCore.Namespace.ID { namespace.id }
-
-    var children: [NamespaceNode]? {
-        guard namespace.isExpandable else { return nil }
-        if let loaded = session.children[namespace.id] {
-            return loaded.map { NamespaceNode(namespace: $0, session: session) }
-        }
-        // Trigger lazy load; OutlineGroup re-renders when children update.
-        Task { await session.loadChildren(of: namespace) }
-        return []
+struct SidebarNode: @MainActor Identifiable {
+    enum Kind {
+        case namespace(DBCore.Namespace, parent: DBCore.Namespace?)
+        case group(String, parent: DBCore.Namespace)
     }
 
-    var icon: String {
+    let kind: Kind
+    let session: ConnectionSession
+
+    var id: String {
+        switch kind {
+        case .namespace(let namespace, _): return namespace.id
+        case .group(let name, let parent): return parent.id + "#group:" + name
+        }
+    }
+
+    var children: [SidebarNode]? {
+        switch kind {
+        case .group(let name, let parent):
+            return visibleTables(of: parent)
+                .filter { session.group(for: $0) == name }
+                .map { SidebarNode(kind: .namespace($0, parent: parent), session: session) }
+        case .namespace(let namespace, _):
+            guard namespace.isExpandable else { return nil }
+            guard let loaded = session.children[namespace.id] else {
+                // Trigger lazy load; OutlineGroup re-renders when children update.
+                Task { await session.loadChildren(of: namespace) }
+                return []
+            }
+            var nodes: [SidebarNode] = loaded
+                .filter { !$0.kind.isTable }
+                .map { SidebarNode(kind: .namespace($0, parent: namespace), session: session) }
+            let tables = visibleTables(of: namespace)
+            let groups = Set(tables.compactMap { session.group(for: $0) }).sorted()
+            nodes += groups.map {
+                SidebarNode(kind: .group($0, parent: namespace), session: session)
+            }
+            nodes += tables
+                .filter { session.group(for: $0) == nil }
+                .map { SidebarNode(kind: .namespace($0, parent: namespace), session: session) }
+            return nodes
+        }
+    }
+
+    private func visibleTables(of parent: DBCore.Namespace) -> [DBCore.Namespace] {
+        (session.children[parent.id] ?? [])
+            .filter(\.kind.isTable)
+            .filter { session.showHiddenTables || !session.isHidden($0) }
+    }
+
+    static func icon(for namespace: DBCore.Namespace) -> String {
         switch namespace.kind {
         case .database: return "cylinder"
         case .schema: return "folder"
@@ -220,13 +390,62 @@ struct NamespaceNode: @MainActor Identifiable {
         }
     }
 
-    var defaultQuery: String {
+    static func defaultQuery(
+        for namespace: DBCore.Namespace, in session: ConnectionSession
+    ) -> String {
         let descriptor = session.descriptor
         if descriptor.queryLanguage == .mongo {
             return "db.\(namespace.path.joined(separator: ".")).find({}).limit(100)"
         }
         let path = namespace.path.map { descriptor.quoted($0) }.joined(separator: ".")
         return "SELECT * FROM \(path) LIMIT 100;"
+    }
+}
+
+extension DBCore.Namespace.Kind {
+    var isTable: Bool {
+        if case .table = self { return true }
+        return false
+    }
+}
+
+// MARK: - Note editor
+
+struct NoteEditorView: View {
+    let session: ConnectionSession
+    let namespace: DBCore.Namespace
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(namespace.path.joined(separator: "."), systemImage: "note.text")
+                .font(.headline)
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minHeight: 120)
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.secondary.opacity(0.3)))
+            HStack {
+                if session.note(for: namespace) != nil {
+                    Button("Remove Note", role: .destructive) {
+                        session.setNote(nil, for: namespace)
+                        dismiss()
+                    }
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    session.setNote(text, for: namespace)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 420)
+        .onAppear { text = session.note(for: namespace) ?? "" }
     }
 }
 
@@ -250,6 +469,9 @@ struct ResultsArea: View {
 
 struct QueryView: View {
     @Bindable var tab: QueryTab
+    let session: ConnectionSession
+    @State private var savingQuery = false
+    @State private var savedQueryName = ""
 
     var body: some View {
         VSplitView {
@@ -263,6 +485,15 @@ struct QueryView: View {
         }
         .toolbar {
             ToolbarItemGroup {
+                Button {
+                    savedQueryName = ""
+                    savingQuery = true
+                } label: {
+                    Label("Save Query", systemImage: "bookmark")
+                }
+                .disabled(tab.queryText.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty)
+                .help("Save this query to the sidebar")
                 ExportMenu(tab: tab)
                 if tab.runState == .running || tab.runState == .streaming {
                     Button {
@@ -279,6 +510,17 @@ struct QueryView: View {
                     .keyboardShortcut(.return, modifiers: .command)
                 }
             }
+        }
+        .alert("Save Query", isPresented: $savingQuery) {
+            TextField("Name", text: $savedQueryName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let name = savedQueryName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                session.saveQuery(named: name, text: tab.queryText)
+            }
+        } message: {
+            Text("Saved queries appear in the sidebar for this connection.")
         }
     }
 

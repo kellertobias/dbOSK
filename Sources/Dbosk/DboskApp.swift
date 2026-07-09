@@ -27,6 +27,12 @@ struct DboskApp: App {
                 .environment(appModel)
         }
         .windowToolbarStyle(.unified)
+
+        // Preferences (⌘,) — define the labels connections can carry.
+        Settings {
+            LabelSettingsView()
+                .environment(appModel)
+        }
     }
 }
 

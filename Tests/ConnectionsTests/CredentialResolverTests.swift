@@ -63,7 +63,7 @@ import Testing
 
         let profiles = [
             ConnectionProfile(
-                name: "prod", groupName: "Production", colorTag: .red,
+                name: "prod", groupName: "Production", labelID: UUID(),
                 driverID: "postgres", host: "prod.db", port: 5432,
                 credentialSource: .keychain),
             ConnectionProfile(

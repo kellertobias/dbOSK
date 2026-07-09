@@ -5,6 +5,7 @@ import SwiftUI
 /// and limit/offset paging. Builds a SELECT and reuses the streaming runner.
 struct TableModeView: View {
     @Bindable var browser: TableBrowser
+    var session: ConnectionSession?
 
     var body: some View {
         if browser.table == nil {
@@ -40,6 +41,13 @@ struct TableModeView: View {
                     columnsMenu
                         .disabled(browser.isLoadingColumns)
                 }
+            }
+            if let session, let table = browser.table,
+               let note = session.note(for: table) {
+                Label(note, systemImage: "note.text")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             HStack {
                 Text(browser.descriptor.queryLanguage == .mongo ? "FILTER" : "WHERE")

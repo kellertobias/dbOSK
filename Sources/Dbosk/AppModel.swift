@@ -18,17 +18,28 @@ final class AppModel {
     ]
 
     var profiles: [ConnectionProfile] = []
+    /// User-defined labels, managed in Preferences and referenced by profiles.
+    var labels: [ConnectionLabel] = []
     /// Live sessions keyed by profile id; each gets its own window.
     var sessions: [UUID: ConnectionSession] = [:]
     var connectionError: String?
     var isConnecting = false
 
     private let profileStore = ProfileStore()
+    private let labelStore = LabelStore()
     private let resolver = CredentialResolver()
     let keychain = KeychainStore()
 
     init() {
+        labels = (try? labelStore.load()) ?? []
         profiles = (try? profileStore.load()) ?? []
+        migrateLegacyColorTags()
+    }
+
+    /// The label a profile carries, if any.
+    func label(for profile: ConnectionProfile) -> ConnectionLabel? {
+        guard let id = profile.labelID else { return nil }
+        return labels.first { $0.id == id }
     }
 
     func saveProfiles() {
@@ -37,6 +48,60 @@ final class AppModel {
         } catch {
             connectionError = "Could not save connections: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Labels
+
+    func saveLabels() {
+        do {
+            try labelStore.save(labels)
+        } catch {
+            connectionError = "Could not save labels: \(error.localizedDescription)"
+        }
+    }
+
+    func upsertLabel(_ label: ConnectionLabel) {
+        if let index = labels.firstIndex(where: { $0.id == label.id }) {
+            labels[index] = label
+        } else {
+            labels.append(label)
+        }
+        saveLabels()
+    }
+
+    func deleteLabel(_ label: ConnectionLabel) {
+        labels.removeAll { $0.id == label.id }
+        var changedProfiles = false
+        for index in profiles.indices where profiles[index].labelID == label.id {
+            profiles[index].labelID = nil
+            changedProfiles = true
+        }
+        if changedProfiles { saveProfiles() }
+        saveLabels()
+    }
+
+    /// Converts any pre-labels `colorTag` on loaded profiles into named labels,
+    /// reusing an existing label of the same color, so upgrading users keep the
+    /// stripe/badge colors they had.
+    private func migrateLegacyColorTags() {
+        var changedLabels = false
+        var changedProfiles = false
+        for index in profiles.indices {
+            guard let legacy = profiles[index].legacyColorTag else { continue }
+            let label: ConnectionLabel
+            if let existing = labels.first(where: { $0.colorTag == legacy }) {
+                label = existing
+            } else {
+                label = ConnectionLabel(name: legacy.displayName, colorTag: legacy)
+                labels.append(label)
+                changedLabels = true
+            }
+            profiles[index].labelID = label.id
+            profiles[index].legacyColorTag = nil
+            changedProfiles = true
+        }
+        if changedLabels { saveLabels() }
+        if changedProfiles { saveProfiles() }
     }
 
     func upsert(_ profile: ConnectionProfile, password: String?) {
@@ -116,6 +181,12 @@ final class ConnectionSession: Identifiable {
     var tabs: [WorkTab] = []
     var selectedTabID: WorkTab.ID?
 
+    /// User metadata: saved queries, table notes, groups, hidden flags.
+    var metadata: ConnectionMetadata
+    /// Transient sidebar toggle to reveal hidden tables.
+    var showHiddenTables = false
+    private let metadataStore = MetadataStore()
+
     var selectedTab: WorkTab? {
         tabs.first { $0.id == selectedTabID }
     }
@@ -123,6 +194,70 @@ final class ConnectionSession: Identifiable {
     init(profile: ConnectionProfile, driver: any DatabaseDriver) {
         self.profile = profile
         self.driver = driver
+        self.metadata = MetadataStore().load(for: profile.id)
+    }
+
+    // MARK: User metadata
+
+    private func persistMetadata() {
+        try? metadataStore.save(metadata, for: profile.id)
+    }
+
+    func saveQuery(named name: String, text: String) {
+        metadata.savedQueries.append(SavedQuery(name: name, text: text))
+        persistMetadata()
+    }
+
+    func deleteSavedQuery(_ query: SavedQuery) {
+        metadata.savedQueries.removeAll { $0.id == query.id }
+        persistMetadata()
+    }
+
+    func note(for namespace: Namespace) -> String? {
+        metadata.meta(for: namespace.path).note
+    }
+
+    func setNote(_ note: String?, for namespace: Namespace) {
+        let trimmed = note?.trimmingCharacters(in: .whitespacesAndNewlines)
+        metadata.update(namespace.path) {
+            $0.note = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        }
+        persistMetadata()
+    }
+
+    func group(for namespace: Namespace) -> String? {
+        metadata.meta(for: namespace.path).group
+    }
+
+    func setGroup(_ group: String?, for namespace: Namespace) {
+        metadata.update(namespace.path) { $0.group = group }
+        persistMetadata()
+    }
+
+    func isHidden(_ namespace: Namespace) -> Bool {
+        metadata.meta(for: namespace.path).hidden
+    }
+
+    func setHidden(_ hidden: Bool, for namespace: Namespace) {
+        metadata.update(namespace.path) { $0.hidden = hidden }
+        persistMetadata()
+    }
+
+    /// "Only show this table": hides every sibling table except `namespace`.
+    func hideOthers(than namespace: Namespace, in parent: Namespace) {
+        for sibling in children[parent.id] ?? [] {
+            guard case .table = sibling.kind else { continue }
+            metadata.update(sibling.path) { $0.hidden = sibling.path != namespace.path }
+        }
+        persistMetadata()
+    }
+
+    func unhideAll(in parent: Namespace) {
+        for sibling in children[parent.id] ?? [] {
+            guard case .table = sibling.kind else { continue }
+            metadata.update(sibling.path) { $0.hidden = false }
+        }
+        persistMetadata()
     }
 
     /// Opens (or re-focuses) a table tab. Clicking a table always lands in
@@ -288,8 +423,6 @@ final class QueryTab {
         }
     }
 }
-
-extension DBError.Kind: Equatable {}
 
 extension Array {
     subscript(safe index: Int) -> Element? {
