@@ -1,66 +1,37 @@
 #!/bin/bash
 # Usage:
 #   ./build                  debug build
-#   ./build archive          release build
+#   ./build archive          release build + dist/Dbosk.app (via Scripts/make-app.sh)
 #   ./build archive install  release build, then install Dbosk.app to ~/Applications
 #   ./build open             debug build, kill running instances, launch a fresh one
+#
+# Bundle assembly (Info.plist, icon, codesign) lives in Scripts/make-app.sh —
+# the single source of truth — so the installed app and the distributed app
+# are byte-for-byte the same bundle.
 set -euo pipefail
+cd "$(dirname "$0")"
 
 APP_NAME="Dbosk"
-BUNDLE_ID="dev.tobiaskeller.dbosk"
 INSTALL_DIR="$HOME/Applications"
 
 mode="${1:-debug}"
 action="${2:-}"
 
 if [[ "$mode" == "archive" ]]; then
-    swift build -c release
-    BIN_PATH=".build/release/$APP_NAME"
-else
-    swift build
-    BIN_PATH=".build/debug/$APP_NAME"
+    Scripts/make-app.sh
+    if [[ "$action" == "install" ]]; then
+        APP_BUNDLE="$INSTALL_DIR/$APP_NAME.app"
+        mkdir -p "$INSTALL_DIR"
+        rm -rf "$APP_BUNDLE"
+        cp -R "dist/$APP_NAME.app" "$APP_BUNDLE"
+        codesign --verify --deep --strict "$APP_BUNDLE"
+        echo "Installed $APP_BUNDLE"
+    fi
+    exit 0
 fi
 
-if [[ "$mode" == "archive" && "$action" == "install" ]]; then
-    APP_BUNDLE="$INSTALL_DIR/$APP_NAME.app"
-    CONTENTS="$APP_BUNDLE/Contents"
-
-    rm -rf "$APP_BUNDLE"
-    mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
-    cp "$BIN_PATH" "$CONTENTS/MacOS/$APP_NAME"
-    cp "Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
-
-    cat > "$CONTENTS/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleIdentifier</key>
-    <string>$BUNDLE_ID</string>
-    <key>CFBundleName</key>
-    <string>$APP_NAME</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-</dict>
-</plist>
-PLIST
-
-    echo "Installed $APP_BUNDLE"
-fi
+swift build
+BIN_PATH=".build/debug/$APP_NAME"
 
 if [[ "$mode" == "open" ]]; then
     pkill -f "$INSTALL_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true

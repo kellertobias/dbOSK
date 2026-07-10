@@ -14,7 +14,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 APP_NAME="Dbosk"
-BUNDLE_ID="dev.dbosk.app"
+# Keep in sync with nothing else: this script is the single source of truth
+# for the bundle (./build archive install copies its output). UserDefaults
+# are scoped to this id, so changing it orphans existing preferences.
+BUNDLE_ID="dev.tobiaskeller.dbosk"
 VERSION="0.1.0"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
@@ -51,6 +54,7 @@ PLIST
 if [[ -f Resources/AppIcon.icns ]]; then
     cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
     /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$APP/Contents/Info.plist"
 fi
 
 echo "==> Signing (identity: $IDENTITY)"
