@@ -6,6 +6,13 @@ import SwiftUI
 struct TableModeView: View {
     @Bindable var browser: TableBrowser
     var session: ConnectionSession?
+    /// Statements shown in the pre-apply SQL preview sheet.
+    @State private var applyPreview: SQLApplyPreview?
+
+    private struct SQLApplyPreview: Identifiable {
+        let id = UUID()
+        let statements: [String]
+    }
 
     var body: some View {
         if browser.table == nil {
@@ -20,14 +27,35 @@ struct TableModeView: View {
                     Divider()
                     ResultsArea(
                         columns: browser.resultTab.columns,
-                        rows: browser.resultTab.rows,
-                        version: browser.resultTab.resultVersion)
+                        rows: browser.displayRows,
+                        version: browser.displayVersion,
+                        editing: browser.editingConfig)
                     statusBar
                 } else {
                     structureHeader
                     Divider()
                     TableStructureView(browser: browser)
                 }
+            }
+            .sheet(item: $applyPreview) { preview in
+                ApplyPreviewSheet(statements: preview.statements) {
+                    browser.apply(statements: preview.statements)
+                }
+            }
+            .confirmationDialog(
+                "Discard pending changes?",
+                isPresented: Binding(
+                    get: { browser.pendingNavigation != nil },
+                    set: { if !$0 { browser.cancelPendingNavigation() } })
+            ) {
+                Button("Discard & Continue", role: .destructive) {
+                    browser.confirmPendingNavigation()
+                }
+                Button("Cancel", role: .cancel) {
+                    browser.cancelPendingNavigation()
+                }
+            } message: {
+                Text("You have \(browser.pending.summary) that have not been applied.")
             }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
@@ -44,7 +72,7 @@ struct TableModeView: View {
                             }
                         } else {
                             Button {
-                                browser.load()
+                                browser.requestNavigation { browser.load() }
                             } label: {
                                 Label("Load", systemImage: "play.fill")
                             }
@@ -135,8 +163,10 @@ struct TableModeView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
                 .onSubmit {
-                    browser.offset = 0
-                    browser.load()
+                    browser.requestNavigation {
+                        browser.offset = 0
+                        browser.load()
+                    }
                 }
             }
             HStack(spacing: 12) {
@@ -145,7 +175,7 @@ struct TableModeView: View {
                     TextField("0", value: $browser.offset, format: .number)
                         .frame(width: 70)
                         .textFieldStyle(.roundedBorder)
-                        .onSubmit { browser.load() }
+                        .onSubmit { browser.requestNavigation { browser.load() } }
                 }
                 HStack(spacing: 4) {
                     Text("Rows").font(.caption).foregroundStyle(.secondary)
@@ -153,8 +183,10 @@ struct TableModeView: View {
                         .frame(width: 70)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit {
-                            browser.offset = 0
-                            browser.load()
+                            browser.requestNavigation {
+                                browser.offset = 0
+                                browser.load()
+                            }
                         }
                 }
                 Button {
@@ -170,17 +202,59 @@ struct TableModeView: View {
                     Image(systemName: "chevron.right")
                 }
                 .help("Next page")
+                if browser.isEditable {
+                    Divider().frame(height: 16)
+                    editingControls
+                }
                 Spacer()
             }
         }
         .padding(10)
     }
 
+    /// Insert/delete row plus Apply/Discard, shown only while editing is allowed.
+    private var editingControls: some View {
+        HStack(spacing: 8) {
+            Button {
+                browser.pending.addInsertedRow()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .help("Insert row")
+            Button {
+                browser.deleteDisplayRows(browser.selectedDisplayRows)
+            } label: {
+                Image(systemName: "minus")
+            }
+            .disabled(browser.selectedDisplayRows.isEmpty)
+            .help("Delete selected row(s)")
+            if !browser.pending.isEmpty {
+                Button("Apply…") {
+                    do {
+                        applyPreview = SQLApplyPreview(
+                            statements: try browser.buildApplyStatements())
+                    } catch {
+                        browser.applyState = .failed(String(describing: error))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(browser.applyState == .applying)
+                .help("Review and apply pending changes")
+                Button("Discard") {
+                    browser.discardChanges()
+                }
+                .help("Throw away all pending changes")
+            }
+        }
+    }
+
     private var columnsMenu: some View {
         Menu {
             Button("All Columns") {
-                browser.selectedColumns = []
-                browser.load()
+                browser.requestNavigation {
+                    browser.selectedColumns = []
+                    browser.load()
+                }
             }
             Divider()
             ForEach(browser.availableColumns, id: \.name) { column in
@@ -190,13 +264,15 @@ struct TableModeView: View {
                             || browser.selectedColumns.contains(column.name)
                     },
                     set: { _ in
-                        // Deselecting from "all" state keeps the others selected.
-                        if browser.selectedColumns.isEmpty {
-                            browser.selectedColumns = Set(
-                                browser.availableColumns.map(\.name))
+                        browser.requestNavigation {
+                            // Deselecting from "all" state keeps the others selected.
+                            if browser.selectedColumns.isEmpty {
+                                browser.selectedColumns = Set(
+                                    browser.availableColumns.map(\.name))
+                            }
+                            browser.toggleColumn(column.name)
+                            browser.load()
                         }
-                        browser.toggleColumn(column.name)
-                        browser.load()
                     }
                 )) {
                     Text("\(column.name)  –  \(column.dbTypeName)")
@@ -233,6 +309,27 @@ struct TableModeView: View {
             case .cancelled:
                 Text("Cancelled").foregroundStyle(.orange)
             }
+            switch browser.applyState {
+            case .idle:
+                if !browser.pending.isEmpty {
+                    Label(browser.pending.summary, systemImage: "pencil")
+                        .foregroundStyle(.orange)
+                }
+            case .applying:
+                ProgressView().controlSize(.small)
+                Text("Applying…")
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+            // Explain why cells aren't editable once data is on screen.
+            if browser.descriptor.supportsTableEditing,
+               case .done = browser.resultTab.runState,
+               let reason = browser.editingDisabledReason {
+                Label(reason, systemImage: "pencil.slash")
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             ExportStatusView(tab: browser.resultTab)
         }
@@ -240,5 +337,43 @@ struct TableModeView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+}
+
+/// Pre-apply confirmation: the exact SQL that will run, in order, in one
+/// transaction. Literal encoding makes this preview byte-for-byte truthful.
+private struct ApplyPreviewSheet: View {
+    let statements: [String]
+    let onApply: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(
+                "\(statements.count) statement\(statements.count == 1 ? "" : "s") will run in one transaction",
+                systemImage: "checklist")
+                .font(.headline)
+            ScrollView {
+                Text(statements.joined(separator: ";\n\n") + ";")
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Apply") {
+                    dismiss()
+                    onApply()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 520, minHeight: 300)
     }
 }

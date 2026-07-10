@@ -628,6 +628,8 @@ final class TableBrowser {
     var applyState: ApplyState = .idle
     /// Navigation blocked by pending edits; the UI confirms or cancels it.
     var pendingNavigation: (() -> Void)?
+    /// Grid selection (display row indexes), for the toolbar delete button.
+    var selectedDisplayRows = IndexSet()
 
     /// Executes the built query; reuses the streaming runner.
     let resultTab: QueryTab

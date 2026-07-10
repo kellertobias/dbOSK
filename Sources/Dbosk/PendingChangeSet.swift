@@ -97,6 +97,14 @@ final class PendingChangeSet {
         version += 1
     }
 
+    /// Unsets a cell of a staged insert so the column falls to its DB default.
+    func clearInsertedValue(id: InsertedRow.ID, column: Int) {
+        guard let index = insertedRows.firstIndex(where: { $0.id == id }),
+              insertedRows[index].cells.removeValue(forKey: column) != nil
+        else { return }
+        version += 1
+    }
+
     func discardAll() {
         guard !isEmpty else { return }
         cellEdits = [:]

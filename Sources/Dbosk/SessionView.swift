@@ -612,12 +612,14 @@ struct ResultsArea: View {
     let columns: [ColumnMeta]
     let rows: [ResultRow]
     let version: Int
+    var editing: ResultsTableView.EditingConfig?
 
     var body: some View {
         if columns.count == 1, columns[0].dbTypeName == "document" {
             DocumentResultsView(rows: rows)
         } else {
-            ResultsTableView(columns: columns, rows: rows, version: version)
+            ResultsTableView(
+                columns: columns, rows: rows, version: version, editing: editing)
         }
     }
 }
