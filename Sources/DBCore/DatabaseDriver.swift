@@ -382,7 +382,13 @@ extension DatabaseDriver {
         }
 
         func fail(at index: Int, statement: String, error: Error) async -> BatchError {
-            let rolledBack = (try? await run("ROLLBACK")) != nil
+            // Not `try?`: it flattens the Int? result, making a successful
+            // rollback with no affected count look like a failure.
+            var rolledBack = false
+            do {
+                _ = try await run("ROLLBACK")
+                rolledBack = true
+            } catch {}
             let dbError = error as? DBError
                 ?? DBError(kind: .queryFailed, message: String(describing: error))
             return BatchError(
