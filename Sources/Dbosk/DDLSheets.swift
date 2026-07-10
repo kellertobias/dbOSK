@@ -266,6 +266,133 @@ struct RenameColumnSheet: View {
     }
 }
 
+// MARK: - Create table
+
+struct CreateTableSheet: View {
+    let session: ConnectionSession
+    /// Sidebar node the table is created under (database or schema).
+    let parent: DBCore.Namespace
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var tableName = ""
+    @State private var columns: [ColumnDraft] = [ColumnDraft()]
+    @State private var runner = DDLRunner()
+
+    struct ColumnDraft: Identifiable {
+        let id = UUID()
+        var name = ""
+        var typeName = ""
+        var isNullable = true
+        var defaultExpression = ""
+        var isPrimaryKey = false
+
+        var definition: ColumnDefinition {
+            ColumnDefinition(
+                name: name,
+                typeName: typeName,
+                isNullable: isNullable,
+                defaultExpression: defaultExpression.isEmpty ? nil : defaultExpression,
+                isPrimaryKey: isPrimaryKey)
+        }
+    }
+
+    /// SQLite tables are a single-level namespace; everything else nests
+    /// under the sidebar parent (schema/database).
+    private var newTable: DBCore.Namespace {
+        let path = session.descriptor.sqlDialect == .sqlite
+            ? [tableName] : parent.path + [tableName]
+        return DBCore.Namespace(path: path, kind: .table(.table), isExpandable: false)
+    }
+
+    private var statement: Result<String, Error> {
+        Result {
+            guard !tableName.trimmingCharacters(in: .whitespaces).isEmpty else {
+                throw DBError(kind: .queryFailed, message: "Enter a table name")
+            }
+            return try DDLStatementBuilder.createTable(
+                newTable, columns: columns.map(\.definition), for: session.descriptor)
+        }
+    }
+
+    var body: some View {
+        DDLSheetScaffold(
+            title: "New Table in \(parent.name)",
+            executeTitle: "Create Table",
+            statement: statement,
+            runner: runner,
+            onExecute: { sql in
+                runner.run(sql, using: session.runDDL) {
+                    dismiss()
+                    Task { await session.reloadChildren(of: parent) }
+                }
+            }
+        ) {
+            TextField("table name", text: $tableName)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+            columnsEditor
+        }
+        .frame(minWidth: 640)
+    }
+
+    private var columnsEditor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("Columns").font(.caption.weight(.semibold))
+                Spacer()
+                Button {
+                    columns.append(ColumnDraft())
+                } label: {
+                    Label("Add Column", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            List {
+                ForEach($columns) { $column in
+                    columnRow($column)
+                        .listRowSeparator(.hidden)
+                }
+                .onMove { source, destination in
+                    columns.move(fromOffsets: source, toOffset: destination)
+                }
+            }
+            .listStyle(.plain)
+            .frame(minHeight: 140, maxHeight: 240)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func columnRow(_ column: Binding<ColumnDraft>) -> some View {
+        HStack(spacing: 6) {
+            TextField("name", text: column.name)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 110)
+            ColumnTypeField(
+                dialect: session.descriptor.sqlDialect, typeName: column.typeName)
+                .frame(minWidth: 130)
+            TextField("default", text: column.defaultExpression)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .frame(minWidth: 80)
+            Toggle("NULL", isOn: column.isNullable)
+                .toggleStyle(.checkbox)
+                .help("Allows NULL")
+            Toggle("PK", isOn: column.isPrimaryKey)
+                .toggleStyle(.checkbox)
+                .help("Primary key")
+            Button {
+                columns.removeAll { $0.id == column.wrappedValue.id }
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .disabled(columns.count == 1)
+            .help("Remove column")
+        }
+    }
+}
+
 // MARK: - Create index
 
 struct CreateIndexSheet: View {

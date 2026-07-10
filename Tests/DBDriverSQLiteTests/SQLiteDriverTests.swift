@@ -268,6 +268,65 @@ import Testing
         await driver.disconnect()
     }
 
+    @Test func builderGeneratedDDLRoundTrips() async throws {
+        let driver = try makeDriver(try makeDatabase())
+        try await driver.connect()
+
+        let table = Namespace(path: ["orders"], kind: .table(.table), isExpandable: false)
+        let descriptor = SQLiteDriver.descriptor
+        let createTable = try DDLStatementBuilder.createTable(
+            table,
+            columns: [
+                ColumnDefinition(name: "id", typeName: "INTEGER", isPrimaryKey: true),
+                ColumnDefinition(name: "customer", typeName: "TEXT", isNullable: false),
+                ColumnDefinition(name: "status", typeName: "TEXT", defaultExpression: "'open'"),
+            ],
+            for: descriptor)
+        let createIndex = try DDLStatementBuilder.createIndex(
+            named: "idx_orders_customer", on: table, columns: ["customer"],
+            unique: true, for: descriptor)
+        _ = try await driver.executeBatch([createTable, createIndex])
+
+        let structure = try await driver.describeTable(table)
+        #expect(structure.columns.map(\.name) == ["id", "customer", "status"])
+        #expect(structure.columns[0].isPrimaryKey)
+        #expect(!structure.columns[1].isNullable)
+        #expect(structure.columns[2].defaultValue == "'open'")
+        #expect(structure.indexes.contains {
+            $0.name == "idx_orders_customer" && $0.isUnique
+        })
+
+        // Alter round-trip: add, rename, then drop a column.
+        _ = try await driver.executeBatch([
+            try DDLStatementBuilder.addColumn(
+                ColumnDefinition(name: "total", typeName: "REAL"), to: table, for: descriptor)
+        ])
+        _ = try await driver.executeBatch([
+            DDLStatementBuilder.renameColumn("total", to: "amount", in: table, for: descriptor)
+        ])
+        var altered = try await driver.describeTable(table)
+        #expect(altered.columns.map(\.name).contains("amount"))
+
+        _ = try await driver.executeBatch([
+            DDLStatementBuilder.dropColumn("amount", from: table, for: descriptor)
+        ])
+        altered = try await driver.describeTable(table)
+        #expect(!altered.columns.map(\.name).contains("amount"))
+
+        // Drop index + drop table leave a clean slate.
+        _ = try await driver.executeBatch([
+            try DDLStatementBuilder.dropIndex(
+                named: "idx_orders_customer", on: table, for: descriptor)
+        ])
+        _ = try await driver.executeBatch([
+            DDLStatementBuilder.dropTable(table, for: descriptor)
+        ])
+        let tables = try await driver.listNamespaces(
+            parent: Namespace(path: ["test.sqlite"], kind: .database, isExpandable: true))
+        #expect(!tables.contains { $0.name == "orders" })
+        await driver.disconnect()
+    }
+
     @Test func dmlReportsAffectedCount() async throws {
         let driver = try makeDriver(try makeDatabase())
         try await driver.connect()

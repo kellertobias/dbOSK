@@ -178,6 +178,7 @@ struct SidebarView: View {
     @State private var renameText = ""
     @State private var expandedIDs: Set<String> = []
     @State private var dropTableRequest: DropTableRequest?
+    @State private var createTableParent: DBCore.Namespace?
 
     var body: some View {
         List {
@@ -246,6 +247,9 @@ struct SidebarView: View {
         .padding(.top, 16)
         .sheet(item: $noteTarget) { namespace in
             NoteEditorView(session: session, namespace: namespace)
+        }
+        .sheet(item: $createTableParent) { parent in
+            CreateTableSheet(session: session, parent: parent)
         }
         .alert("New Group", isPresented: groupAlertShown) {
             TextField("Group name", text: $newGroupName)
@@ -455,6 +459,10 @@ struct SidebarView: View {
             } else {
                 Button("New Query") { session.openQueryTab() }
                 Button("Show All Tables") { session.unhideAll(in: namespace) }
+                if session.descriptor.supportsDDL {
+                    Divider()
+                    Button("New Table…") { createTableParent = namespace }
+                }
             }
         }
     }
