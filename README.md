@@ -5,6 +5,14 @@ MongoDB, and SQLite. Streaming results, cancellable queries, CSV/JSON export,
 saved queries, table notes/groups/visibility, and shell-script credential
 loading (1Password CLI, AWS, …).
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Connections list](docs/connections.png) Manage multiple connections, grouped and labeled | ![Table structure](docs/sql-structure.png) Inspect columns, types, and indexes |
+| ![Query results grid](docs/sql-table.png) Browse table data with filters and paging | ![SQL query editor](docs/sql-query.png) Write and save complex SQL, browse results inline |
+| ![MongoDB structure](docs/mongo-structure.png) Same structure view for MongoDB collections | ![MongoDB document viewer](docs/mongo-data.png) Browse documents as JSON or tree |
+
 ## Build & run (development)
 
 ```sh
