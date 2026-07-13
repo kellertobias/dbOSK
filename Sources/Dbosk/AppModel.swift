@@ -225,10 +225,23 @@ final class ConnectionSession: Identifiable {
     /// User metadata: saved queries, table notes, groups, hidden flags.
     var metadata: ConnectionMetadata
     /// Transient sidebar toggle to reveal hidden tables.
-    var showHiddenTables = false
+    var showHiddenTables = false {
+        didSet { invalidateSidebarNodes() }
+    }
     /// Sidebar visibility edit mode: shows checkboxes on tables/groups.
-    var editingVisibility = false
+    var editingVisibility = false {
+        didSet { invalidateSidebarNodes() }
+    }
     private let metadataStore = MetadataStore()
+
+    /// Memoized sidebar structure per parent node id. SwiftUI re-evaluates
+    /// the outline on every render pass; with thousands of tables the
+    /// filter/group work is far too hot to redo each time. Derived data
+    /// only — invalidated wherever its observable inputs change.
+    @ObservationIgnored private var sidebarNodeCache: [String: [SidebarNode.Kind]] = [:]
+    /// Parents with a child-listing query in flight, so a render pass during
+    /// a slow load can't fire duplicate queries.
+    @ObservationIgnored private var childLoadsInFlight: Set<String> = []
 
     var selectedTab: WorkTab? {
         tabs.first { $0.id == selectedTabID }
@@ -288,8 +301,12 @@ final class ConnectionSession: Identifiable {
         persistMetadata()
     }
 
+    // Lookups use the namespace's precomputed `pathKey` (same key
+    // `ConnectionMetadata.key(for:)` produces) — these run per row per
+    // render pass, so no per-call path joins.
+
     func note(for namespace: Namespace) -> String? {
-        metadata.meta(for: namespace.path).note
+        metadata.tables[namespace.pathKey]?.note
     }
 
     func setNote(_ note: String?, for namespace: Namespace) {
@@ -301,20 +318,22 @@ final class ConnectionSession: Identifiable {
     }
 
     func group(for namespace: Namespace) -> String? {
-        metadata.meta(for: namespace.path).group
+        metadata.tables[namespace.pathKey]?.group
     }
 
     func setGroup(_ group: String?, for namespace: Namespace) {
         metadata.update(namespace.path) { $0.group = group }
+        invalidateSidebarNodes()
         persistMetadata()
     }
 
     func isHidden(_ namespace: Namespace) -> Bool {
-        metadata.meta(for: namespace.path).hidden
+        metadata.tables[namespace.pathKey]?.hidden ?? false
     }
 
     func setHidden(_ hidden: Bool, for namespace: Namespace) {
         metadata.update(namespace.path) { $0.hidden = hidden }
+        invalidateSidebarNodes()
         persistMetadata()
     }
 
@@ -323,6 +342,7 @@ final class ConnectionSession: Identifiable {
     func unhideAll(in parent: Namespace) {
         metadata.update(parent.path) { $0.hidden = false }
         metadata.unhideDescendants(of: parent.path)
+        invalidateSidebarNodes()
         persistMetadata()
     }
 
@@ -348,6 +368,7 @@ final class ConnectionSession: Identifiable {
                 }
             }
         }
+        invalidateSidebarNodes()
         persistMetadata()
     }
 
@@ -358,7 +379,152 @@ final class ConnectionSession: Identifiable {
         where self.group(for: namespace) == group {
             metadata.update(namespace.path) { $0.hidden = !visible }
         }
+        invalidateSidebarNodes()
         persistMetadata()
+    }
+
+    // MARK: Sidebar tree
+
+    private func invalidateSidebarNodes() {
+        sidebarNodeCache = [:]
+    }
+
+    /// Child nodes of an expandable namespace: nested schemas, then group
+    /// folders, then ungrouped tables — filtered by the visibility state.
+    /// Memoized; a missing child list triggers one (deduplicated) load.
+    func sidebarChildren(of namespace: Namespace) -> [SidebarNode.Kind]? {
+        guard namespace.isExpandable else { return nil }
+        // Read the observable inputs unconditionally so SwiftUI re-renders
+        // the outline when they change, even when serving from cache.
+        let loaded = children[namespace.id]
+        let showAll = editingVisibility || showHiddenTables
+        let tableMeta = metadata.tables
+
+        if let cached = sidebarNodeCache[namespace.id] { return cached }
+        guard let loaded else {
+            loadChildrenIfNeeded(namespace)
+            return []
+        }
+        var nodes: [SidebarNode.Kind] = []
+        var groups: Set<String> = []
+        var ungrouped: [Namespace] = []
+        for child in loaded {
+            let meta = tableMeta[child.pathKey]
+            guard showAll || meta?.hidden != true else { continue }
+            if !child.kind.isTable {
+                nodes.append(.namespace(child, parent: namespace))
+            } else if let group = meta?.group {
+                groups.insert(group)
+            } else {
+                ungrouped.append(child)
+            }
+        }
+        nodes += groups.sorted().map { .group($0, parent: namespace) }
+        nodes += ungrouped.map { .namespace($0, parent: namespace) }
+        sidebarNodeCache[namespace.id] = nodes
+        return nodes
+    }
+
+    /// Visible tables of `parent` belonging to a group folder. Memoized
+    /// under the group node's id.
+    func sidebarGroupChildren(group name: String, in parent: Namespace) -> [SidebarNode.Kind] {
+        let loaded = children[parent.id]
+        let showAll = editingVisibility || showHiddenTables
+        let tableMeta = metadata.tables
+
+        let cacheKey = parent.id + "#group:" + name
+        if let cached = sidebarNodeCache[cacheKey] { return cached }
+        let nodes: [SidebarNode.Kind] = (loaded ?? [])
+            .compactMap { child in
+                guard child.kind.isTable else { return nil }
+                let meta = tableMeta[child.pathKey]
+                guard meta?.group == name, showAll || meta?.hidden != true
+                else { return nil }
+                return .namespace(child, parent: parent)
+            }
+        sidebarNodeCache[cacheKey] = nodes
+        return nodes
+    }
+
+    /// Kicks off a child load unless one already completed or is running —
+    /// render passes during a slow listing must not stack duplicate queries.
+    /// `onLoaded` fires after a load this call started completes.
+    func loadChildrenIfNeeded(
+        _ namespace: Namespace, onLoaded: (@MainActor () -> Void)? = nil
+    ) {
+        guard children[namespace.id] == nil,
+              !childLoadsInFlight.contains(namespace.id) else { return }
+        childLoadsInFlight.insert(namespace.id)
+        Task {
+            await loadChildren(of: namespace)
+            childLoadsInFlight.remove(namespace.id)
+            onLoaded?()
+        }
+    }
+
+    /// The visible outline flattened into one list. The sidebar renders this
+    /// with a single flat ForEach: SwiftUI's hierarchical List (nested
+    /// DisclosureGroups) re-diffs the whole tree through its outline
+    /// coordinator on every update — seconds with thousands of tables —
+    /// while a flat list diffs in milliseconds. Each row carries all its
+    /// display data so unchanged rows skip re-rendering entirely.
+    func sidebarRows(expanded: Set<String>) -> [SidebarRow] {
+        let editing = editingVisibility
+        var rows: [SidebarRow] = []
+
+        func checkState(for namespace: Namespace) -> SidebarRow.CheckState {
+            if isHidden(namespace) { return .unchecked }
+            if !namespace.kind.isTable, hasHiddenDescendants(namespace) {
+                return .mixed
+            }
+            return .checked
+        }
+
+        func groupCheckState(name: String, parent: Namespace) -> SidebarRow.CheckState {
+            var total = 0
+            var visible = 0
+            for table in allTables(in: parent) where group(for: table) == name {
+                total += 1
+                if !isHidden(table) { visible += 1 }
+            }
+            return visible == total ? .checked : (visible == 0 ? .unchecked : .mixed)
+        }
+
+        func append(_ kind: SidebarNode.Kind, depth: Int) {
+            let row: SidebarRow
+            switch kind {
+            case .namespace(let namespace, _):
+                row = SidebarRow(
+                    kind: kind, depth: depth,
+                    isHidden: isHidden(namespace),
+                    note: note(for: namespace),
+                    editing: editing,
+                    checkState: editing ? checkState(for: namespace) : nil)
+            case .group(let name, let parent):
+                row = SidebarRow(
+                    kind: kind, depth: depth,
+                    isHidden: false, note: nil,
+                    editing: editing,
+                    checkState: editing
+                        ? groupCheckState(name: name, parent: parent) : nil)
+            }
+            rows.append(row)
+            guard row.isExpandable, expanded.contains(row.id) else { return }
+            let childKinds: [SidebarNode.Kind]
+            switch kind {
+            case .namespace(let namespace, _):
+                childKinds = sidebarChildren(of: namespace) ?? []
+            case .group(let name, let parent):
+                childKinds = sidebarGroupChildren(group: name, in: parent)
+            }
+            for child in childKinds { append(child, depth: depth + 1) }
+        }
+
+        let showAll = editing || showHiddenTables
+        for root in rootNamespaces where showAll || !isHidden(root) {
+            append(.namespace(root, parent: nil), depth: 0)
+        }
+        return rows
     }
 
     /// Opens (or re-focuses) a table tab. Clicking a table always lands in
@@ -430,6 +596,7 @@ final class ConnectionSession: Identifiable {
         guard children[namespace.id] == nil else { return }
         do {
             children[namespace.id] = try await driver.listNamespaces(parent: namespace)
+            invalidateSidebarNodes()
         } catch {
             sidebarError = String(describing: error)
         }
@@ -438,6 +605,7 @@ final class ConnectionSession: Identifiable {
     /// Re-lists a parent's children, e.g. after CREATE/DROP TABLE.
     func reloadChildren(of namespace: Namespace) async {
         children[namespace.id] = nil
+        invalidateSidebarNodes()
         await loadChildren(of: namespace)
     }
 

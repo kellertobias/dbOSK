@@ -192,12 +192,17 @@ struct SidebarView: View {
                 }
             }
             Section {
-                ForEach(session.rootNamespaces
-                    .filter { SidebarNode.isShown($0, in: session) }
-                    .map {
-                        SidebarNode(kind: .namespace($0, parent: nil), session: session)
-                    }) { node in
-                    outlineRow(node)
+                ForEach(session.sidebarRows(expanded: expandedIDs)) { row in
+                    SidebarOutlineRow(
+                        row: row,
+                        session: session,
+                        isExpanded: row.isExpandable && expandedIDs.contains(row.id),
+                        onToggleExpand: { toggleExpanded(row.id) },
+                        noteTarget: $noteTarget,
+                        groupTarget: $groupTarget,
+                        dropTableRequest: $dropTableRequest,
+                        createTableParent: $createTableParent)
+                        .equatable()
                 }
             } header: {
                 HStack(spacing: 8) {
@@ -216,7 +221,7 @@ struct SidebarView: View {
                             .buttonStyle(.borderless)
                             .font(.caption.weight(.semibold))
                     } else {
-                        if !session.metadata.tables.filter(\.value.hidden).isEmpty {
+                        if session.metadata.tables.contains(where: \.value.hidden) {
                             Button {
                                 session.showHiddenTables.toggle()
                             } label: {
@@ -339,44 +344,6 @@ struct SidebarView: View {
             }
     }
 
-    /// Whether this node expands/collapses on click rather than opening.
-    private func isExpandableNode(_ node: SidebarNode) -> Bool {
-        switch node.kind {
-        case .group:
-            return true
-        case .namespace(let namespace, _):
-            return namespace.isExpandable
-        }
-    }
-
-    private func outlineRow(_ node: SidebarNode) -> AnyView {
-        if isExpandableNode(node) {
-            return AnyView(
-                DisclosureGroup(isExpanded: expandedBinding(for: node.id)) {
-                    ForEach(node.children ?? []) { child in
-                        outlineRow(child)
-                    }
-                } label: {
-                    row(for: node)
-                        .onTapGesture { toggleExpanded(node.id) }
-                })
-        } else {
-            return AnyView(row(for: node))
-        }
-    }
-
-    private func expandedBinding(for id: String) -> Binding<Bool> {
-        Binding(
-            get: { expandedIDs.contains(id) },
-            set: { isExpanded in
-                if isExpanded {
-                    expandedIDs.insert(id)
-                } else {
-                    expandedIDs.remove(id)
-                }
-            })
-    }
-
     private func toggleExpanded(_ id: String) {
         if expandedIDs.contains(id) {
             expandedIDs.remove(id)
@@ -385,133 +352,172 @@ struct SidebarView: View {
         }
     }
 
-    @ViewBuilder
-    private func row(for node: SidebarNode) -> some View {
-        switch node.kind {
+}
+
+/// One flattened outline row: manual indentation and chevron instead of
+/// nested DisclosureGroups (whose diffing cost made large sidebars lag).
+///
+/// Renders purely from `row` + `isExpanded` — session state is only read
+/// inside click actions and menu bodies — so `.equatable()` can skip every
+/// row whose data did not change when the sidebar updates.
+private struct SidebarOutlineRow: View, @MainActor Equatable {
+    let row: SidebarRow
+    let session: ConnectionSession
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
+    @Binding var noteTarget: DBCore.Namespace?
+    @Binding var groupTarget: DBCore.Namespace?
+    @Binding var dropTableRequest: SidebarView.DropTableRequest?
+    @Binding var createTableParent: DBCore.Namespace?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.row == rhs.row && lhs.isExpanded == rhs.isExpanded
+    }
+
+    var body: some View {
+        switch row.kind {
         case .group(let name, let parent):
-            HStack(spacing: 4) {
-                if session.editingVisibility {
-                    groupCheckbox(name: name, parent: parent)
-                }
-                Label(name, systemImage: "folder.fill")
-                    .foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
+            groupRow(name: name, parent: parent)
         case .namespace(let namespace, let parent):
             namespaceRow(namespace, parent: parent)
         }
     }
 
-    /// Checkbox for a whole group: checked / unchecked / mixed.
-    private func groupCheckbox(name: String, parent: DBCore.Namespace) -> some View {
-        let tables = session.allTables(in: parent)
-            .filter { session.group(for: $0) == name }
-        let visibleCount = tables.filter { !session.isHidden($0) }.count
-        let symbol = visibleCount == tables.count
-            ? "checkmark.square.fill"
-            : (visibleCount == 0 ? "square" : "minus.square.fill")
-        return Button {
-            session.setGroupVisible(visibleCount != tables.count, group: name, in: parent)
-        } label: {
-            Image(systemName: symbol)
-                .foregroundStyle(visibleCount == 0 ? .secondary : Color.accentColor)
+    @ViewBuilder
+    private var indentAndChevron: some View {
+        if row.depth > 0 {
+            Spacer().frame(width: CGFloat(row.depth) * 14)
         }
-        .buttonStyle(.borderless)
-        .help("Show or hide all tables in \(name)")
+        if row.isExpandable {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .frame(width: 12)
+        }
     }
 
-    /// Checkbox for a schema/database. Hiding sets one flag on the namespace
-    /// itself (cheap even with thousands of tables, and no children need to
-    /// be loaded); the mixed state means "visible, but something inside is
-    /// hidden" and clicking it unhides the whole subtree.
-    private func namespaceCheckbox(_ namespace: DBCore.Namespace) -> some View {
-        let isHidden = session.isHidden(namespace)
-        let mixed = !isHidden && session.hasHiddenDescendants(namespace)
-        let symbol = isHidden
-            ? "square"
-            : (mixed ? "minus.square.fill" : "checkmark.square.fill")
-        return Button {
-            if isHidden {
-                session.setHidden(false, for: namespace)
-            } else if mixed {
-                session.unhideAll(in: namespace)
-            } else {
-                session.setHidden(true, for: namespace)
+    private func checkbox(
+        _ state: SidebarRow.CheckState, action: @escaping () -> Void
+    ) -> some View {
+        let symbol = switch state {
+        case .checked: "checkmark.square.fill"
+        case .unchecked: "square"
+        case .mixed: "minus.square.fill"
+        }
+        return Button(action: action) {
+            Image(systemName: symbol)
+                .foregroundStyle(state == .unchecked ? .secondary : Color.accentColor)
+        }
+        .buttonStyle(.borderless)
+    }
+
+    private func groupRow(name: String, parent: DBCore.Namespace) -> some View {
+        HStack(spacing: 4) {
+            indentAndChevron
+            if let state = row.checkState {
+                checkbox(state) {
+                    // Not all visible → make all visible; all visible → hide all.
+                    session.setGroupVisible(state != .checked, group: name, in: parent)
+                }
+                .help("Show or hide all tables in \(name)")
             }
-        } label: {
-            Image(systemName: symbol)
-                .foregroundStyle(isHidden ? .secondary : Color.accentColor)
+            Label(name, systemImage: "folder.fill")
+                .foregroundStyle(.secondary)
         }
-        .buttonStyle(.borderless)
-        .help("Show or hide \(namespace.name) and everything in it")
-    }
-
-    private func kindLabel(for namespace: DBCore.Namespace) -> String {
-        namespace.kind == .database ? "Database" : "Schema"
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onToggleExpand)
     }
 
     private func namespaceRow(
         _ namespace: DBCore.Namespace, parent: DBCore.Namespace?
     ) -> some View {
-        let isHidden = session.isHidden(namespace)
-        let note = session.note(for: namespace)
         let isTable = namespace.kind.isTable
         return HStack(spacing: 4) {
-            if session.editingVisibility {
-                if isTable {
-                    Image(systemName: isHidden ? "square" : "checkmark.square.fill")
-                        .foregroundStyle(isHidden ? .secondary : Color.accentColor)
-                } else {
-                    namespaceCheckbox(namespace)
-                }
+            indentAndChevron
+            if let state = row.checkState {
+                checkbox(state) { toggleCheckbox(namespace, state: state) }
+                    .help(isTable
+                        ? "Show or hide \(namespace.name)"
+                        : "Show or hide \(namespace.name) and everything in it")
             }
             Label(namespace.name, systemImage: SidebarNode.icon(for: namespace))
-                .foregroundStyle(isHidden ? .tertiary : .primary)
-            if note != nil {
+                .foregroundStyle(row.isHidden ? .tertiary : .primary)
+            if row.note != nil {
                 Image(systemName: "note.text")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            if isHidden {
+            if row.isHidden {
                 Image(systemName: "eye.slash")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
         }
-        .help(note ?? "")
+        .help(row.note ?? "")
         .contentShape(Rectangle())
         .modifier(TableTapModifier(
             isTable: isTable,
             action: {
                 if session.editingVisibility {
-                    session.setHidden(!isHidden, for: namespace)
+                    session.setHidden(!row.isHidden, for: namespace)
                 } else {
                     session.openTable(namespace)
                 }
             }))
+        .modifier(ExpandTapModifier(
+            isExpandable: row.isExpandable,
+            action: onToggleExpand))
         .contextMenu {
-            if case .table = namespace.kind {
-                tableContextMenu(namespace, parent: parent)
+            // Child views: their bodies (and session reads) only run when
+            // the menu is actually opened, keeping row updates cheap.
+            if isTable {
+                TableRowMenu(
+                    namespace: namespace, parent: parent, session: session,
+                    noteTarget: $noteTarget, groupTarget: $groupTarget,
+                    dropTableRequest: $dropTableRequest)
             } else {
-                Button("New Query") { session.openQueryTab() }
-                Button(isHidden
-                    ? "Unhide \(kindLabel(for: namespace))"
-                    : "Hide \(kindLabel(for: namespace))") {
-                    session.setHidden(!isHidden, for: namespace)
-                }
-                Button("Show All Tables") { session.unhideAll(in: namespace) }
-                if session.descriptor.supportsDDL {
-                    Divider()
-                    Button("New Table…") { createTableParent = namespace }
-                }
+                ContainerRowMenu(
+                    namespace: namespace, session: session,
+                    createTableParent: $createTableParent)
             }
         }
     }
 
-    @ViewBuilder
-    private func tableContextMenu(
-        _ namespace: DBCore.Namespace, parent: DBCore.Namespace?
-    ) -> some View {
+    /// Checkbox semantics: tables toggle; for a schema/database, hiding sets
+    /// one flag on the namespace itself (cheap even with thousands of
+    /// tables, and no children need to be loaded), unhiding restores the
+    /// previous per-table state, and the mixed state ("visible, but
+    /// something inside is hidden") unhides the whole subtree.
+    private func toggleCheckbox(
+        _ namespace: DBCore.Namespace, state: SidebarRow.CheckState
+    ) {
+        if namespace.kind.isTable {
+            session.setHidden(state == .checked, for: namespace)
+            return
+        }
+        switch state {
+        case .unchecked:
+            session.setHidden(false, for: namespace)
+        case .mixed:
+            session.unhideAll(in: namespace)
+        case .checked:
+            session.setHidden(true, for: namespace)
+        }
+    }
+}
+
+/// Context menu for a table row. Session state is read in this body, which
+/// only runs when the menu opens.
+private struct TableRowMenu: View {
+    let namespace: DBCore.Namespace
+    let parent: DBCore.Namespace?
+    let session: ConnectionSession
+    @Binding var noteTarget: DBCore.Namespace?
+    @Binding var groupTarget: DBCore.Namespace?
+    @Binding var dropTableRequest: SidebarView.DropTableRequest?
+
+    var body: some View {
         Button("Open Table") { session.openTable(namespace) }
         Button("Show Structure") { session.openTable(namespace, mode: .structure) }
         Button("Query Table") {
@@ -552,7 +558,7 @@ struct SidebarView: View {
         if session.descriptor.supportsDDL, namespace.kind == .table(.table) {
             Divider()
             Button("Drop Table…", role: .destructive) {
-                dropTableRequest = DropTableRequest(
+                dropTableRequest = SidebarView.DropTableRequest(
                     table: namespace,
                     parent: parent,
                     sql: DDLStatementBuilder.dropTable(namespace, for: session.descriptor))
@@ -561,66 +567,33 @@ struct SidebarView: View {
     }
 }
 
-/// Sidebar tree node: a real namespace or a user-defined table group.
-@MainActor
-struct SidebarNode: @MainActor Identifiable {
-    enum Kind {
+/// Context menu for a schema/database row.
+private struct ContainerRowMenu: View {
+    let namespace: DBCore.Namespace
+    let session: ConnectionSession
+    @Binding var createTableParent: DBCore.Namespace?
+
+    var body: some View {
+        let kindLabel = namespace.kind == .database ? "Database" : "Schema"
+        let isHidden = session.isHidden(namespace)
+        Button("New Query") { session.openQueryTab() }
+        Button(isHidden ? "Unhide \(kindLabel)" : "Hide \(kindLabel)") {
+            session.setHidden(!isHidden, for: namespace)
+        }
+        Button("Show All Tables") { session.unhideAll(in: namespace) }
+        if session.descriptor.supportsDDL {
+            Divider()
+            Button("New Table…") { createTableParent = namespace }
+        }
+    }
+}
+
+/// Sidebar node kinds and shared helpers.
+enum SidebarNode {
+    /// A real namespace or a user-defined table group.
+    enum Kind: Equatable {
         case namespace(DBCore.Namespace, parent: DBCore.Namespace?)
         case group(String, parent: DBCore.Namespace)
-    }
-
-    let kind: Kind
-    let session: ConnectionSession
-
-    var id: String {
-        switch kind {
-        case .namespace(let namespace, _): return namespace.id
-        case .group(let name, let parent): return parent.id + "#group:" + name
-        }
-    }
-
-    var children: [SidebarNode]? {
-        switch kind {
-        case .group(let name, let parent):
-            return visibleTables(of: parent)
-                .filter { session.group(for: $0) == name }
-                .map { SidebarNode(kind: .namespace($0, parent: parent), session: session) }
-        case .namespace(let namespace, _):
-            guard namespace.isExpandable else { return nil }
-            guard let loaded = session.children[namespace.id] else {
-                // Trigger lazy load; OutlineGroup re-renders when children update.
-                Task { await session.loadChildren(of: namespace) }
-                return []
-            }
-            var nodes: [SidebarNode] = loaded
-                .filter { !$0.kind.isTable && Self.isShown($0, in: session) }
-                .map { SidebarNode(kind: .namespace($0, parent: namespace), session: session) }
-            let tables = visibleTables(of: namespace)
-            let groups = Set(tables.compactMap { session.group(for: $0) }).sorted()
-            nodes += groups.map {
-                SidebarNode(kind: .group($0, parent: namespace), session: session)
-            }
-            nodes += tables
-                .filter { session.group(for: $0) == nil }
-                .map { SidebarNode(kind: .namespace($0, parent: namespace), session: session) }
-            return nodes
-        }
-    }
-
-    private func visibleTables(of parent: DBCore.Namespace) -> [DBCore.Namespace] {
-        (session.children[parent.id] ?? [])
-            .filter(\.kind.isTable)
-            .filter { Self.isShown($0, in: session) }
-    }
-
-    /// Whether a namespace (table, schema, or database) appears in the
-    /// sidebar: always in edit mode or with hidden items revealed, otherwise
-    /// only when not hidden.
-    static func isShown(
-        _ namespace: DBCore.Namespace, in session: ConnectionSession
-    ) -> Bool {
-        session.editingVisibility || session.showHiddenTables
-            || !session.isHidden(namespace)
     }
 
     static func icon(for namespace: DBCore.Namespace) -> String {
@@ -633,6 +606,7 @@ struct SidebarNode: @MainActor Identifiable {
         }
     }
 
+    @MainActor
     static func defaultQuery(
         for namespace: DBCore.Namespace, in session: ConnectionSession
     ) -> String {
@@ -645,6 +619,41 @@ struct SidebarNode: @MainActor Identifiable {
     }
 }
 
+/// One row of the flattened sidebar outline (see
+/// `ConnectionSession.sidebarRows(expanded:)` for why the tree is flat).
+///
+/// Carries every value the row renders from, so the row view is a pure
+/// function of this struct: rows whose data didn't change are skipped
+/// entirely on updates (`SidebarOutlineRow` is `.equatable()`).
+struct SidebarRow: Identifiable, Equatable {
+    enum CheckState {
+        case checked, unchecked, mixed
+    }
+
+    let kind: SidebarNode.Kind
+    let depth: Int
+    let isHidden: Bool
+    let note: String?
+    /// Visibility-edit mode (checkboxes shown).
+    let editing: Bool
+    /// Checkbox state while editing; nil outside edit mode.
+    let checkState: CheckState?
+
+    var id: String {
+        switch kind {
+        case .namespace(let namespace, _): return namespace.id
+        case .group(let name, let parent): return parent.id + "#group:" + name
+        }
+    }
+
+    var isExpandable: Bool {
+        switch kind {
+        case .group: return true
+        case .namespace(let namespace, _): return namespace.isExpandable
+        }
+    }
+}
+
 extension DBCore.Namespace.Kind {
     var isTable: Bool {
         if case .table = self { return true }
@@ -652,8 +661,23 @@ extension DBCore.Namespace.Kind {
     }
 }
 
+/// Attaches a tap gesture only to expandable rows so they toggle open/closed;
+/// table rows keep their own open-table gesture from `TableTapModifier`.
+private struct ExpandTapModifier: ViewModifier {
+    let isExpandable: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if isExpandable {
+            content.onTapGesture(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
 /// Attaches a tap gesture only for table rows, letting non-table (expandable)
-/// namespace rows fall through to the enclosing DisclosureGroup's tap-to-expand.
+/// namespace rows fall through to the row's tap-to-expand.
 private struct TableTapModifier: ViewModifier {
     let isTable: Bool
     let action: () -> Void

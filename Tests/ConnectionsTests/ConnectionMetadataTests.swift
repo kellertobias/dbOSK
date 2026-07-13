@@ -1,3 +1,4 @@
+import DBCore
 import Foundation
 import Testing
 
@@ -99,6 +100,15 @@ import Testing
         // ["a.b", "c"] and ["a", "b.c"] must map to different keys.
         #expect(ConnectionMetadata.key(for: ["a.b", "c"])
             != ConnectionMetadata.key(for: ["a", "b.c"]))
+    }
+
+    @Test func namespacePathKeyMatchesMetadataKey() {
+        // Namespace.pathKey (DBCore) is used directly as a metadata lookup
+        // key in hot paths — the two joins must stay identical.
+        let namespace = DBCore.Namespace(
+            path: ["mydb", "public", "users"], kind: .table(.table),
+            isExpandable: false)
+        #expect(namespace.pathKey == ConnectionMetadata.key(for: namespace.path))
     }
 
     @Test func hasHiddenDescendantsIsStrictlyBelow() {
