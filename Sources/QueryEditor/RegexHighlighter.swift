@@ -23,17 +23,7 @@ public final class RegexHighlighter {
 
         switch language {
         case .sql, .partiql:
-            let keywords = [
-                "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL",
-                "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-                "ALTER", "DROP", "TABLE", "INDEX", "VIEW", "JOIN", "LEFT", "RIGHT",
-                "INNER", "OUTER", "FULL", "CROSS", "ON", "AS", "GROUP", "BY",
-                "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT",
-                "CASE", "WHEN", "THEN", "ELSE", "END", "LIKE", "ILIKE", "BETWEEN",
-                "EXISTS", "ASC", "DESC", "WITH", "RECURSIVE", "RETURNING", "CAST",
-                "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "DEFAULT", "TRUE", "FALSE",
-            ]
-            add(#"\b(\#(keywords.joined(separator: "|")))\b"#, .systemBlue,
+            add(#"\b(\#(SQLSyntax.keywords.joined(separator: "|")))\b"#, .systemBlue,
                 options: [.caseInsensitive])
             add(#"\b\d+(\.\d+)?\b"#, .systemPurple)
             add(#"'(?:[^']|'')*'"#, .systemRed)

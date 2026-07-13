@@ -242,6 +242,19 @@ final class ConnectionSession: Identifiable {
     /// Parents with a child-listing query in flight, so a render pass during
     /// a slow load can't fire duplicate queries.
     @ObservationIgnored private var childLoadsInFlight: Set<String> = []
+    /// Cached column listings for the query editor's typeahead, keyed by
+    /// table namespace id. Loads are deduplicated like child listings.
+    @ObservationIgnored var columnCache: [String: [ColumnMeta]] = [:]
+    @ObservationIgnored private var columnLoadsInFlight: Set<String> = []
+    @ObservationIgnored private var _completionProvider: SchemaCompletionProvider?
+
+    /// Feeds the query editor's typeahead; lazily created, session-shared.
+    var completionProvider: SchemaCompletionProvider {
+        if let provider = _completionProvider { return provider }
+        let provider = SchemaCompletionProvider(session: self)
+        _completionProvider = provider
+        return provider
+    }
 
     var selectedTab: WorkTab? {
         tabs.first { $0.id == selectedTabID }
@@ -459,6 +472,22 @@ final class ConnectionSession: Identifiable {
             await loadChildren(of: namespace)
             childLoadsInFlight.remove(namespace.id)
             onLoaded?()
+        }
+    }
+
+    /// Fetches and caches a table's columns for typeahead unless already
+    /// cached or loading. `onLoaded` fires after a successful fetch.
+    func loadColumnsIfNeeded(
+        of table: Namespace, onLoaded: @escaping @MainActor () -> Void
+    ) {
+        guard columnCache[table.id] == nil,
+              !columnLoadsInFlight.contains(table.id) else { return }
+        columnLoadsInFlight.insert(table.id)
+        Task {
+            defer { columnLoadsInFlight.remove(table.id) }
+            guard let columns = try? await driver.listColumns(of: table) else { return }
+            columnCache[table.id] = columns
+            onLoaded()
         }
     }
 

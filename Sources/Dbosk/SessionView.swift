@@ -828,7 +828,9 @@ struct QueryView: View {
     var body: some View {
         VSplitView {
             VStack(spacing: 0) {
-                SyntaxTextEditor(text: $tab.queryText, language: tab.language)
+                SyntaxTextEditor(
+                    text: $tab.queryText, language: tab.language,
+                    completionProvider: session.completionProvider)
                     .frame(minHeight: 80)
                 statusBar
             }
