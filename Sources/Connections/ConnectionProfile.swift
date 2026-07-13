@@ -19,6 +19,9 @@ public enum CredentialSource: Codable, Sendable, Hashable {
     /// Credentials resolved at connect time by running a user script that
     /// prints JSON to stdout.
     case script(ScriptConfig)
+    /// Credentials fetched at connect time from an AWS Secrets Manager
+    /// secret, authenticating with the local `~/.aws` config (SSO or IAM).
+    case awsSecretsManager(AWSSecretConfig)
     case none
 }
 

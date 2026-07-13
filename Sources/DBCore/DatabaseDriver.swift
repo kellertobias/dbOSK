@@ -72,6 +72,9 @@ public struct ResolvedConnectionConfig: Sendable {
     /// For file-based databases (SQLite).
     public var filePath: String?
     public var tls: TLSMode
+    /// Secret-free note about how credentials were resolved (e.g. which keys
+    /// an AWS secret contained), appended to connection errors for debugging.
+    public var credentialDiagnostics: String?
 
     public init(
         host: String? = nil,
@@ -81,7 +84,8 @@ public struct ResolvedConnectionConfig: Sendable {
         database: String? = nil,
         uri: String? = nil,
         filePath: String? = nil,
-        tls: TLSMode = .preferred
+        tls: TLSMode = .preferred,
+        credentialDiagnostics: String? = nil
     ) {
         self.host = host
         self.port = port
@@ -91,6 +95,7 @@ public struct ResolvedConnectionConfig: Sendable {
         self.uri = uri
         self.filePath = filePath
         self.tls = tls
+        self.credentialDiagnostics = credentialDiagnostics
     }
 }
 

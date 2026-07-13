@@ -77,6 +77,35 @@ prints JSON to stdout:
 All keys are optional and merged over the profile's fields; `uri` wins when
 present. stderr is shown on failure; stdout is never logged or persisted.
 
+## AWS Secrets Manager
+
+A connection can instead reference an AWS Secrets Manager secret ("AWS Secret"
+credential mode in the editor). Authentication uses your existing `~/.aws`
+setup — pick a named profile (SSO profiles work; run `aws sso login --profile
+<name>` first) or leave it empty for the default credential chain. The region
+comes from the connection, the secret's ARN, the profile's config, or
+`AWS_REGION`, in that order.
+
+The secret's JSON follows the RDS-managed shape. At connect time the secret
+supplies the password and fills in any fields the profile leaves empty —
+host, port, user, and database set on the connection win over the secret's
+values (useful when the secret's endpoint is only resolvable inside the VPC).
+Nothing from the secret is persisted locally:
+
+```json
+{ "username": "…", "password": "…", "host": "…", "port": 5432, "dbname": "…" }
+```
+
+`user`/`database`/`hostname`/`uri` aliases are accepted; a plain-string secret
+is treated as just the password. Secrets with non-standard key names can be
+mapped in the editor: "Fetch Keys" lists the secret's key names (values are
+never shown) and each field gets a dropdown to pick its key, with "Auto"
+falling back to the aliases above. Opt-in integration test:
+
+```sh
+DBOSK_AWS_TESTS=1 DBOSK_AWS_SECRET_ID=prod/db [DBOSK_AWS_PROFILE=…] swift test
+```
+
 ## Layout
 
 - `Sources/DBCore` — value model (`DBValue`), `DatabaseDriver` protocol, streaming `QueryExecution`

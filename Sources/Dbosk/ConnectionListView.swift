@@ -159,6 +159,17 @@ struct ConnectionEditView: View {
     @State private var password = ""
     @State private var scriptPath = ""
     @State private var scriptArgs = ""
+    @State private var awsProfile = ""
+    @State private var awsRegion = ""
+    @State private var awsSecretID = ""
+    @State private var awsKeyHost = ""
+    @State private var awsKeyPort = ""
+    @State private var awsKeyUser = ""
+    @State private var awsKeyPassword = ""
+    @State private var awsKeyDatabase = ""
+    @State private var awsFetchedKeys: [String] = []
+    @State private var awsFetchStatus = ""
+    @State private var awsFetchingKeys = false
     @State private var filePath = ""
     @State private var tunnelEnabled = false
     @State private var tunnelHost = ""
@@ -172,6 +183,7 @@ struct ConnectionEditView: View {
         case none = "None"
         case password = "Password"
         case script = "Script"
+        case awsSecret = "AWS Secret"
     }
 
     var body: some View {
@@ -258,6 +270,58 @@ struct ConnectionEditView: View {
                         Text("The script must print JSON with host, port, user, password, database, or uri.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    case .awsSecret:
+                        HStack {
+                            TextField(
+                                "AWS profile", text: $awsProfile,
+                                prompt: Text("Default credential chain"))
+                            if !awsProfiles.isEmpty {
+                                Menu {
+                                    ForEach(awsProfiles, id: \.self) { name in
+                                        Button(name) { awsProfile = name }
+                                    }
+                                } label: {
+                                    Image(systemName: "chevron.down")
+                                }
+                                .menuStyle(.borderlessButton)
+                                .frame(width: 24)
+                            }
+                        }
+                        TextField(
+                            "Region", text: $awsRegion,
+                            prompt: Text("From secret ARN or profile"))
+                        TextField("Secret name or ARN", text: $awsSecretID)
+                        LabeledContent("Secret keys") {
+                            HStack {
+                                Button(awsFetchingKeys ? "Fetching…" : "Fetch Keys") {
+                                    fetchAWSKeys()
+                                }
+                                .disabled(awsSecretID.isEmpty || awsFetchingKeys)
+                                if !awsFetchStatus.isEmpty {
+                                    Text(awsFetchStatus)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        if !awsKeyOptions.isEmpty {
+                            awsKeyPicker("Host key", selection: $awsKeyHost)
+                            awsKeyPicker("Port key", selection: $awsKeyPort)
+                            awsKeyPicker("User key", selection: $awsKeyUser)
+                            awsKeyPicker("Password key", selection: $awsKeyPassword)
+                            awsKeyPicker("Database key", selection: $awsKeyDatabase)
+                        }
+                        Text("""
+                            Uses your AWS credentials from ~/.aws — SSO profiles \
+                            are supported (run `aws sso login` first). The secret \
+                            supplies the password and fills in any of the fields \
+                            above you leave empty; values you set here win over \
+                            the secret's. "Auto" tries the standard RDS key names \
+                            (host, port, username, password, dbname).
+                            """)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
 
                     Toggle("Connect via SSH tunnel", isOn: $tunnelEnabled)
@@ -285,7 +349,10 @@ struct ConnectionEditView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Save") { save() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.isEmpty || (isFileBased && filePath.isEmpty))
+                    .disabled(
+                        name.isEmpty || (isFileBased && filePath.isEmpty)
+                            || (!isFileBased && credentialMode == .awsSecret
+                                && awsSecretID.isEmpty))
             }
         }
         .padding(20)
@@ -321,6 +388,46 @@ struct ConnectionEditView: View {
         Array(Set(appModel.profiles.compactMap(\.groupName))).sorted()
     }
 
+    private var awsProfiles: [String] { AWSConfigFile.profileNames() }
+
+    /// Fetched keys plus any saved selections, so pickers render a previously
+    /// configured mapping even before the secret is re-fetched.
+    private var awsKeyOptions: [String] {
+        let selected = [awsKeyHost, awsKeyPort, awsKeyUser, awsKeyPassword, awsKeyDatabase]
+            .filter { !$0.isEmpty }
+        return Array(Set(awsFetchedKeys + selected)).sorted()
+    }
+
+    private func awsKeyPicker(_ title: String, selection: Binding<String>) -> some View {
+        Picker(title, selection: selection) {
+            Text("Auto").tag("")
+            ForEach(awsKeyOptions, id: \.self) { key in
+                Text(key).tag(key)
+            }
+        }
+    }
+
+    private func fetchAWSKeys() {
+        awsFetchStatus = ""
+        awsFetchingKeys = true
+        let config = AWSSecretConfig(
+            profileName: awsProfile.isEmpty ? nil : awsProfile,
+            region: awsRegion.isEmpty ? nil : awsRegion,
+            secretID: awsSecretID)
+        Task {
+            do {
+                let keys = try await AWSSecretCredentialLoader().availableKeys(config)
+                awsFetchedKeys = keys
+                awsFetchStatus = keys.isEmpty
+                    ? "Secret is a plain string — no keys to map."
+                    : "Found \(keys.count) keys."
+            } catch {
+                awsFetchStatus = String(describing: error)
+            }
+            awsFetchingKeys = false
+        }
+    }
+
     private var defaultPortPrompt: String {
         let port = AppModel.availableDrivers
             .first { $0.id == driverID }?.defaultPort
@@ -349,6 +456,16 @@ struct ConnectionEditView: View {
             credentialMode = .script
             scriptPath = config.path
             scriptArgs = config.args.joined(separator: " ")
+        case .awsSecretsManager(let config):
+            credentialMode = .awsSecret
+            awsProfile = config.profileName ?? ""
+            awsRegion = config.region ?? ""
+            awsSecretID = config.secretID
+            awsKeyHost = config.keyMapping?.host ?? ""
+            awsKeyPort = config.keyMapping?.port ?? ""
+            awsKeyUser = config.keyMapping?.user ?? ""
+            awsKeyPassword = config.keyMapping?.password ?? ""
+            awsKeyDatabase = config.keyMapping?.database ?? ""
         }
         if let tunnel = profile.sshTunnel {
             tunnelEnabled = true
@@ -368,6 +485,19 @@ struct ConnectionEditView: View {
         case .script:
             let args = scriptArgs.split(separator: " ").map(String.init)
             source = .script(ScriptConfig(path: scriptPath, args: args))
+        case .awsSecret:
+            let mapping = AWSSecretKeyMapping(
+                host: awsKeyHost.isEmpty ? nil : awsKeyHost,
+                port: awsKeyPort.isEmpty ? nil : awsKeyPort,
+                user: awsKeyUser.isEmpty ? nil : awsKeyUser,
+                password: awsKeyPassword.isEmpty ? nil : awsKeyPassword,
+                database: awsKeyDatabase.isEmpty ? nil : awsKeyDatabase)
+            source = .awsSecretsManager(
+                AWSSecretConfig(
+                    profileName: awsProfile.isEmpty ? nil : awsProfile,
+                    region: awsRegion.isEmpty ? nil : awsRegion,
+                    secretID: awsSecretID,
+                    keyMapping: mapping.isEmpty ? nil : mapping))
         }
         let updated = ConnectionProfile(
             id: profile?.id ?? UUID(),

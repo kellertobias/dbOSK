@@ -65,7 +65,13 @@ let package = Package(
                 .product(name: "SotoDynamoDB", package: "soto"),
             ]
         ),
-        .target(name: "Connections", dependencies: ["DBCore"]),
+        .target(
+            name: "Connections",
+            dependencies: [
+                "DBCore",
+                .product(name: "SotoSecretsManager", package: "soto"),
+            ]
+        ),
         .target(name: "Export", dependencies: ["DBCore"]),
         .target(name: "QueryEditor", dependencies: ["DBCore"]),
         .executableTarget(

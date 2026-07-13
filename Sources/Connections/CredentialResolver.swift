@@ -6,13 +6,16 @@ import Foundation
 public struct CredentialResolver: Sendable {
     private let keychain: KeychainStore
     private let scriptLoader: ScriptCredentialLoader
+    private let awsSecretLoader: AWSSecretCredentialLoader
 
     public init(
         keychain: KeychainStore = KeychainStore(),
-        scriptLoader: ScriptCredentialLoader = ScriptCredentialLoader()
+        scriptLoader: ScriptCredentialLoader = ScriptCredentialLoader(),
+        awsSecretLoader: AWSSecretCredentialLoader = AWSSecretCredentialLoader()
     ) {
         self.keychain = keychain
         self.scriptLoader = scriptLoader
+        self.awsSecretLoader = awsSecretLoader
     }
 
     public func resolve(_ profile: ConnectionProfile) async throws -> ResolvedConnectionConfig {
@@ -38,6 +41,9 @@ public struct CredentialResolver: Sendable {
             if let password = credentials.password { config.password = password }
             if let database = credentials.database { config.database = database }
             config.uri = credentials.uri
+        case .awsSecretsManager(let awsConfig):
+            let payload = try await awsSecretLoader.load(awsConfig)
+            config = payload.filling(config)
         }
         return config
     }

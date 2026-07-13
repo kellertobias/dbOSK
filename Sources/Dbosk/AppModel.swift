@@ -135,8 +135,10 @@ final class AppModel {
         connectionError = nil
         defer { isConnecting = false }
         var tunnel: SSHTunnel?
+        var credentialDiagnostics: String?
         do {
             var config = try await resolver.resolve(profile)
+            credentialDiagnostics = config.credentialDiagnostics
 
             // Route through an SSH tunnel first when configured: forward a
             // local port to the (resolved) database host and rewrite the
@@ -162,7 +164,11 @@ final class AppModel {
             return true
         } catch {
             tunnel?.stop()
-            connectionError = String(describing: error)
+            var message = String(describing: error)
+            if let credentialDiagnostics {
+                message += "\n\(credentialDiagnostics)"
+            }
+            connectionError = message
             return false
         }
     }
