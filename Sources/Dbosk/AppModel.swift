@@ -477,12 +477,22 @@ final class QueryTab {
         case failed(String)
     }
 
+    enum ExplainState: Equatable {
+        case idle
+        case running
+        case failed(String)
+    }
+
     var queryText: String = ""
     /// The saved query this tab originated from / is linked to, if any.
     /// Its `text` is the last-saved snapshot used to detect unsaved edits.
     var savedQuery: SavedQuery?
     var runState: RunState = .idle
     var exportState: ExportState = .idle
+    var explainState: ExplainState = .idle
+    /// Non-nil while the plan panel replaces the results area; the last
+    /// result set stays untouched underneath and reappears on dismiss.
+    var explainPlan: ExplainPlan?
     var columns: [ColumnMeta] = []
     var rows: [ResultRow] = []
     /// Incremented whenever rows/columns change, so AppKit views know to reload.
@@ -490,6 +500,7 @@ final class QueryTab {
 
     private let driver: any DatabaseDriver
     private var runTask: Task<Void, Never>?
+    private var explainTask: Task<Void, Never>?
     private var cancelHandler: (@Sendable () async -> Void)?
 
     var pageSize: Int
@@ -521,6 +532,7 @@ final class QueryTab {
         guard !sql.isEmpty else { return }
 
         runState = .running
+        dismissExplain()
         columns = []
         rows = []
         resultVersion += 1
@@ -556,6 +568,44 @@ final class QueryTab {
         let handler = cancelHandler
         runTask?.cancel()
         Task { await handler?() }
+    }
+
+    /// Asks the engine for the query's execution plan. Unlike `run()`, the
+    /// current result set is kept — the plan panel overlays it until
+    /// dismissed. `analyze` executes the query for real counts and timings.
+    func explain(analyze: Bool) {
+        guard explainState != .running else { return }
+        let text = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        explainState = .running
+        explainTask = Task { [driver] in
+            do {
+                let plan = try await driver.explain(.sql(text), analyze: analyze)
+                self.explainPlan = plan
+                self.explainState = .idle
+                self.onExecuted?(self.explainHistoryText(for: text, analyze: analyze), true)
+            } catch is CancellationError {
+                self.explainState = .idle
+            } catch {
+                self.explainState = .failed(String(describing: error))
+            }
+        }
+    }
+
+    func dismissExplain() {
+        explainTask?.cancel()
+        explainPlan = nil
+        explainState = .idle
+    }
+
+    /// History records the statement that actually ran: the wrapped EXPLAIN
+    /// for SQL engines, the user's text for Mongo (explain is a command
+    /// wrapper there, not a query rewrite).
+    private func explainHistoryText(for text: String, analyze: Bool) -> String {
+        guard let dialect = type(of: driver).descriptor.sqlDialect else { return text }
+        return ExplainStatementBuilder.statement(
+            for: text, dialect: dialect, analyze: analyze)
     }
 
     /// Re-executes the current query and streams the full result to a file,

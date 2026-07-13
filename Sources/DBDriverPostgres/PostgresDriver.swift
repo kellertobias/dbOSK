@@ -14,7 +14,8 @@ public final class PostgresDriver: DatabaseDriver, Sendable {
         supportsServerSideCancel: true,
         sqlDialect: .postgres,
         supportsTableEditing: true,
-        supportsDDL: true
+        supportsDDL: true,
+        explainSupport: .planAndAnalyze
     )
 
     private let config: ResolvedConnectionConfig
@@ -408,30 +409,7 @@ enum PostgresValueMapper {
     }
 
     static func jsonValue(from text: String) -> DBValue {
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(
-                with: data, options: [.fragmentsAllowed])
-        else { return .string(text) }
-        return dbValue(fromJSON: object)
-    }
-
-    static func dbValue(fromJSON object: Any) -> DBValue {
-        switch object {
-        case is NSNull: return .null
-        case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                return .bool(number.boolValue)
-            }
-            if CFNumberIsFloatType(number) {
-                return .double(number.doubleValue)
-            }
-            return .int(number.int64Value)
-        case let string as String: return .string(string)
-        case let array as [Any]: return .array(array.map { dbValue(fromJSON: $0) })
-        case let dict as [String: Any]:
-            return .document(dict.mapValues { dbValue(fromJSON: $0) })
-        default: return .string(String(describing: object))
-        }
+        DBValue.fromJSONText(text) ?? .string(text)
     }
 }
 

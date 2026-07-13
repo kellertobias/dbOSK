@@ -5,6 +5,13 @@ import Foundation
 public struct DriverDescriptor: Sendable {
     public enum QueryLanguage: Sendable { case sql, mongo, redis, partiql }
 
+    /// Whether the engine can report a query execution plan, and whether it
+    /// additionally supports an "analyze" variant that runs the query for
+    /// real row counts and timings.
+    public enum ExplainSupport: Sendable, Equatable {
+        case none, plan, planAndAnalyze
+    }
+
     public let id: String
     public let displayName: String
     public let queryLanguage: QueryLanguage
@@ -21,6 +28,8 @@ public struct DriverDescriptor: Sendable {
     public let supportsTableEditing: Bool
     /// Structured DDL (create/alter/drop table, create/drop index).
     public let supportsDDL: Bool
+    /// Query-plan inspection ("Explain" in the query toolbar).
+    public let explainSupport: ExplainSupport
 
     public init(
         id: String,
@@ -32,7 +41,8 @@ public struct DriverDescriptor: Sendable {
         identifierQuote: String = "\"",
         sqlDialect: SQLDialect? = nil,
         supportsTableEditing: Bool = false,
-        supportsDDL: Bool = false
+        supportsDDL: Bool = false,
+        explainSupport: ExplainSupport = .none
     ) {
         self.id = id
         self.displayName = displayName
@@ -44,6 +54,7 @@ public struct DriverDescriptor: Sendable {
         self.sqlDialect = sqlDialect
         self.supportsTableEditing = supportsTableEditing
         self.supportsDDL = supportsDDL
+        self.explainSupport = explainSupport
     }
 
     /// Quotes an identifier for this driver's SQL dialect.
@@ -117,15 +128,26 @@ public struct Namespace: Sendable, Hashable, Identifiable {
     public let kind: Kind
     /// Whether children may exist (drives lazy disclosure in the sidebar).
     public let isExpandable: Bool
+    /// `path` joined with the same separator `ConnectionMetadata.key(for:)`
+    /// uses, so metadata lookups need no re-join. Precomputed: identity is
+    /// hot in sidebar rendering with thousands of tables.
+    public let pathKey: String
+    public let id: String
 
-    public var id: String { path.joined(separator: "\u{1F}") + "|\(kind)" }
     public var name: String { path.last ?? "" }
 
     public init(path: [String], kind: Kind, isExpandable: Bool) {
         self.path = path
         self.kind = kind
         self.isExpandable = isExpandable
+        self.pathKey = path.joined(separator: "\u{1F}")
+        self.id = pathKey + "|\(kind)"
     }
+
+    // `id` fully determines path and kind; comparing/hashing one string
+    // beats element-wise array comparison in Set/Dictionary hot paths.
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+    public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 extension Namespace.Kind: CustomStringConvertible {
@@ -357,6 +379,13 @@ public protocol DatabaseDriver: Sendable {
     /// Defaults to BEGIN/COMMIT through `execute` (safe for single-connection
     /// SQL drivers); SQLite overrides with a GRDB-native transaction.
     func executeBatch(_ statements: [String]) async throws -> [BatchStatementResult]
+
+    /// Reports the engine's execution plan for `query`. `analyze` runs the
+    /// query for real row counts and timings (only when the descriptor
+    /// advertises `.planAndAnalyze`). Defaults to wrapping SQL in the
+    /// dialect's EXPLAIN statement through `execute`; MongoDB overrides with
+    /// the `explain` database command.
+    func explain(_ query: DriverQuery, analyze: Bool) async throws -> ExplainPlan
 }
 
 extension DatabaseDriver {

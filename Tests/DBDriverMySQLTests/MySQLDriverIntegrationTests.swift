@@ -215,4 +215,26 @@ struct MySQLDriverIntegrationTests {
         #expect(status?.columns == ["status", "email"])
         await driver.disconnect()
     }
+
+    @Test func explainProducesPlanTree() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+        _ = try await collectAll(try await driver.execute(
+            .sql("""
+                CREATE TABLE IF NOT EXISTS explain_probe
+                    (id INT PRIMARY KEY, label TEXT)
+                """), pageSize: 10))
+
+        let plan = try await driver.explain(
+            .sql("SELECT * FROM explain_probe WHERE id > 5"), analyze: false)
+        #expect(!plan.isAnalyze)
+        #expect(plan.root.operation == "Query Block")
+        #expect(plan.root.estimatedCost != nil)
+        // The table access appears somewhere in the tree with its name.
+        #expect(plan.allNodes.contains { $0.relation == "explain_probe" })
+
+        _ = try await collectAll(try await driver.execute(
+            .sql("DROP TABLE explain_probe"), pageSize: 10))
+        await driver.disconnect()
+    }
 }

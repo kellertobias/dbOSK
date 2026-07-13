@@ -796,6 +796,7 @@ struct QueryView: View {
     let session: ConnectionSession
     @State private var savingQuery = false
     @State private var savedQueryName = ""
+    @State private var confirmingAnalyze = false
     /// nil until the user picks explicitly, so the shape-based default
     /// still applies when the tab switches between result shapes.
     @State private var viewMode: ResultsViewMode?
@@ -807,10 +808,15 @@ struct QueryView: View {
                     .frame(minHeight: 80)
                 statusBar
             }
-            ResultsArea(
-                columns: tab.columns, rows: tab.rows, version: tab.resultVersion,
-                mode: ResultsViewMode.effective(viewMode, columns: tab.columns))
-                .frame(minHeight: 120)
+            if let plan = tab.explainPlan {
+                ExplainPlanView(plan: plan, onClose: { tab.dismissExplain() })
+                    .frame(minHeight: 120)
+            } else {
+                ResultsArea(
+                    columns: tab.columns, rows: tab.rows, version: tab.resultVersion,
+                    mode: ResultsViewMode.effective(viewMode, columns: tab.columns))
+                    .frame(minHeight: 120)
+            }
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -818,6 +824,9 @@ struct QueryView: View {
                 HistoryMenu(tab: tab, session: session)
                 saveControl
                 ExportMenu(tab: tab)
+                if session.descriptor.explainSupport != .none {
+                    explainControl
+                }
                 if tab.runState == .running || tab.runState == .streaming {
                     Button {
                         tab.stop()
@@ -834,6 +843,15 @@ struct QueryView: View {
                 }
             }
         }
+        .alert("Run Query to Analyze?", isPresented: $confirmingAnalyze) {
+            Button("Cancel", role: .cancel) {}
+            Button("Run and Analyze") { tab.explain(analyze: true) }
+        } message: {
+            Text("""
+                Explain Analyze executes the statement to measure it — \
+                including any INSERT, UPDATE, or DELETE side effects.
+                """)
+        }
         .alert("Save Query", isPresented: $savingQuery) {
             TextField("Name", text: $savedQueryName)
             Button("Cancel", role: .cancel) {}
@@ -844,6 +862,48 @@ struct QueryView: View {
             }
         } message: {
             Text("Saved queries appear in the sidebar for this connection.")
+        }
+    }
+
+    /// "Explain" toolbar control: a plain button for plan-only engines, a
+    /// menu adding "Explain Analyze" where supported. Analyze on a writing
+    /// statement asks for confirmation first (it really executes).
+    @ViewBuilder
+    private var explainControl: some View {
+        let isEmpty = tab.queryText.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
+        let isBusy = tab.explainState == .running
+        if session.descriptor.explainSupport == .planAndAnalyze {
+            Menu {
+                Button("Explain") { tab.explain(analyze: false) }
+                    .keyboardShortcut(.return, modifiers: [.command, .shift])
+                Button("Explain Analyze (runs the query)") { requestExplainAnalyze() }
+            } label: {
+                Label("Explain", systemImage: "list.bullet.indent")
+            }
+            .menuIndicator(.visible)
+            .disabled(isEmpty || isBusy)
+            .help("Show the query's execution plan")
+        } else {
+            Button {
+                tab.explain(analyze: false)
+            } label: {
+                Label("Explain", systemImage: "list.bullet.indent")
+            }
+            .keyboardShortcut(.return, modifiers: [.command, .shift])
+            .disabled(isEmpty || isBusy)
+            .help("Show the query's execution plan")
+        }
+    }
+
+    /// Mongo explain wraps read-only commands, so no confirmation needed;
+    /// SQL statements that aren't plain reads get the alert.
+    private func requestExplainAnalyze() {
+        if tab.language == .sql,
+           !ExplainStatementBuilder.isReadOnlyStatement(tab.queryText) {
+            confirmingAnalyze = true
+        } else {
+            tab.explain(analyze: true)
         }
     }
 
@@ -883,21 +943,14 @@ struct QueryView: View {
 
     private var statusBar: some View {
         HStack {
-            switch tab.runState {
-            case .idle:
-                Text("Ready")
-            case .running:
+            if tab.explainState == .running {
                 ProgressView().controlSize(.small)
-                Text("Running…")
-            case .streaming:
-                ProgressView().controlSize(.small)
-                Text("Streaming… \(tab.rows.count) rows")
-            case .done(let count, let elapsed):
-                Text("\(count) rows in \(String(format: "%.2f", elapsed))s")
-            case .failed(let message):
-                Text(message).foregroundStyle(.red).textSelection(.enabled)
-            case .cancelled:
-                Text("Cancelled").foregroundStyle(.orange)
+                Text("Explaining…")
+            } else if case .failed(let message) = tab.explainState {
+                Text("Explain failed: \(message)")
+                    .foregroundStyle(.red).textSelection(.enabled)
+            } else {
+                runStatus
             }
             Spacer()
             ExportStatusView(tab: tab)
@@ -907,6 +960,26 @@ struct QueryView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    @ViewBuilder
+    private var runStatus: some View {
+        switch tab.runState {
+        case .idle:
+            Text("Ready")
+        case .running:
+            ProgressView().controlSize(.small)
+            Text("Running…")
+        case .streaming:
+            ProgressView().controlSize(.small)
+            Text("Streaming… \(tab.rows.count) rows")
+        case .done(let count, let elapsed):
+            Text("\(count) rows in \(String(format: "%.2f", elapsed))s")
+        case .failed(let message):
+            Text(message).foregroundStyle(.red).textSelection(.enabled)
+        case .cancelled:
+            Text("Cancelled").foregroundStyle(.orange)
+        }
     }
 }
 

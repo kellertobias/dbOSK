@@ -12,7 +12,8 @@ public final class SQLiteDriver: DatabaseDriver, Sendable {
         supportsServerSideCancel: true,
         sqlDialect: .sqlite,
         supportsTableEditing: true,
-        supportsDDL: true
+        supportsDDL: true,
+        explainSupport: .plan
     )
 
     private let filePath: String

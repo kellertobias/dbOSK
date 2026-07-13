@@ -226,6 +226,44 @@ struct MongoDriverIntegrationTests {
         #expect(idIndex?.columns == ["_id"])
         #expect(idIndex?.isPrimary == true)
     }
+
+    @Test func explainFindReportsPlan() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+        try await seed(driver)
+
+        // queryPlanner verbosity: plan tree without execution.
+        let plan = try await driver.explain(
+            .sql(#"db.people.find({"active": true})"#), analyze: false)
+        #expect(!plan.isAnalyze)
+        // Unindexed filter on a plain collection: a COLLSCAN somewhere,
+        // flagged as a full scan.
+        #expect(plan.allNodes.contains { $0.operation == "COLLSCAN" && $0.isFullScan })
+        #expect(plan.executionTimeMs == nil)
+
+        // executionStats verbosity: actual row counts and timings.
+        let analyzed = try await driver.explain(
+            .sql(#"db.people.find({"active": true})"#), analyze: true)
+        #expect(analyzed.isAnalyze)
+        #expect(analyzed.executionTimeMs != nil)
+        #expect(analyzed.root.actualRows == 125)
+    }
+
+    @Test func explainAggregateShowsPipelineStages() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+        try await seed(driver)
+
+        let plan = try await driver.explain(
+            .sql(#"db.people.aggregate([{"$match": {"active": true}}, {"$group": {"_id": "$active", "n": {"$sum": 1}}}])"#),
+            analyze: false)
+        // Either a stages pipeline or a single optimized plan, depending on
+        // server version — both must yield a non-empty tree.
+        #expect(!plan.allNodes.isEmpty)
+        #expect(plan.allNodes.contains {
+            $0.operation == "COLLSCAN" || $0.operation == "Aggregation Pipeline"
+        })
+    }
 }
 
 import BSON

@@ -340,4 +340,28 @@ import Testing
         #expect(affected == 10)
         await driver.disconnect()
     }
+
+    @Test func explainQueryPlan() async throws {
+        let driver = try makeDriver(try makeDatabase())
+        try await driver.connect()
+
+        // Primary-key lookup: SEARCH using an index, no full-scan warning.
+        let search = try await driver.explain(
+            .sql("SELECT * FROM people WHERE id = 7"), analyze: false)
+        #expect(!search.isAnalyze)
+        #expect(search.root.operation == "SEARCH")
+        #expect(search.root.relation == "people")
+        #expect(!search.root.isFullScan)
+
+        // Unindexed filter with a sort: SCAN plus a temp b-tree child.
+        let scan = try await driver.explain(
+            .sql("SELECT * FROM people WHERE score > 1 ORDER BY name"),
+            analyze: false)
+        let nodes = scan.allNodes
+        #expect(nodes.contains { $0.operation == "SCAN" && $0.relation == "people" })
+        #expect(nodes.contains { $0.operation.contains("B-TREE") })
+        // EQP carries no cost metrics; the UI hides bars.
+        #expect(scan.totalCost == nil)
+        await driver.disconnect()
+    }
 }

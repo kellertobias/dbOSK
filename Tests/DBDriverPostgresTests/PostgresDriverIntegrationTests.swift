@@ -192,4 +192,34 @@ struct PostgresDriverIntegrationTests {
         #expect(status?.columns == ["status", "email"])
         await driver.disconnect()
     }
+
+    @Test func explainProducesPlanTree() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+
+        let plan = try await driver.explain(
+            .sql("SELECT * FROM generate_series(1, 1000) AS g(n) ORDER BY n DESC"),
+            analyze: false)
+        #expect(!plan.isAnalyze)
+        #expect(plan.root.operation == "Sort")
+        #expect(plan.root.estimatedCost != nil)
+        #expect(plan.root.children.first?.operation == "Function Scan")
+        #expect(plan.executionTimeMs == nil)
+        await driver.disconnect()
+    }
+
+    @Test func explainAnalyzeReportsActuals() async throws {
+        let driver = try makeDriver()
+        try await driver.connect()
+
+        let plan = try await driver.explain(
+            .sql("SELECT count(*) FROM generate_series(1, 1000)"),
+            analyze: true)
+        #expect(plan.isAnalyze)
+        #expect(plan.executionTimeMs != nil)
+        #expect(plan.planningTimeMs != nil)
+        #expect(plan.root.totalActualRows == 1)
+        #expect(plan.allNodes.contains { $0.totalActualRows == 1000 })
+        await driver.disconnect()
+    }
 }

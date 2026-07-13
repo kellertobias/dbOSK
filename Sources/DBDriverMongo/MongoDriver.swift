@@ -12,7 +12,10 @@ public final class MongoDriver: DatabaseDriver, Sendable {
         defaultPort: 27017,
         supportsStreaming: true,
         supportsServerSideCancel: false,
-        identifierQuote: ""
+        identifierQuote: "",
+        // "analyze" maps to executionStats verbosity; find/aggregate/count
+        // are read-only, so it is always safe to run.
+        explainSupport: .planAndAnalyze
     )
 
     private let state: ConnectionActor
@@ -81,6 +84,19 @@ public final class MongoDriver: DatabaseDriver, Sendable {
                 collection: collection, operation: operation, body: body)
         }
         return try await state.execute(shellQuery, pageSize: pageSize)
+    }
+
+    public func explain(_ query: DriverQuery, analyze: Bool) async throws -> ExplainPlan {
+        let shellQuery: MongoShellQuery
+        switch query {
+        case .sql(let text):
+            shellQuery = try MongoQueryParser.parse(text)
+        case .mongo(let collection, let operation, let body):
+            shellQuery = MongoShellQuery(
+                collection: collection, operation: operation, body: body)
+        }
+        let reply = try await state.explain(shellQuery, analyze: analyze)
+        return try ExplainPlanParser.parseMongo(reply: reply, isAnalyze: analyze)
     }
 
     private static func buildURI(_ config: ResolvedConnectionConfig) -> String {
@@ -208,20 +224,25 @@ private actor ConnectionActor {
         }
     }
 
+    /// Splits "otherdb.users" into database + collection. Ambiguous for
+    /// collections whose names contain a dot, but that's rare and the
+    /// connected-database form still works for them.
+    private func resolveTarget(
+        _ target: String, connected: MongoDatabase
+    ) -> (database: String, collection: String) {
+        if let dot = target.firstIndex(of: "."),
+           target.index(after: dot) < target.endIndex {
+            return (
+                String(target[..<dot]),
+                String(target[target.index(after: dot)...]))
+        }
+        return (connected.name, target)
+    }
+
     func execute(_ query: MongoShellQuery, pageSize: Int) async throws -> QueryExecution {
         let connected = try requireDatabase()
-        // "otherdb.users" targets a collection in another database. Ambiguous
-        // for collections whose names contain a dot, but that's rare and the
-        // connected-database form still works for them.
-        let collection: MongoCollection
-        if let dot = query.collection.firstIndex(of: "."),
-           query.collection.index(after: dot) < query.collection.endIndex {
-            let databaseName = String(query.collection[..<dot])
-            let collectionName = String(query.collection[query.collection.index(after: dot)...])
-            collection = connected.pool[databaseName][collectionName]
-        } else {
-            collection = connected[query.collection]
-        }
+        let target = resolveTarget(query.collection, connected: connected)
+        let collection = connected.pool[target.database][target.collection]
 
         switch query.operation {
         case .count:
@@ -251,6 +272,59 @@ private actor ConnectionActor {
                 stages: stages.map { RawStage(stage: $0) },
                 collection: collection)
             return Self.streamDocuments(pipeline, pageSize: pageSize)
+        }
+    }
+
+    /// Runs the query wrapped in the `explain` database command and returns
+    /// the reply document. `analyze` requests executionStats verbosity
+    /// (executes the query for real counts and timings).
+    func explain(_ query: MongoShellQuery, analyze: Bool) async throws -> DBValue {
+        let connected = try requireDatabase()
+        let target = resolveTarget(query.collection, connected: connected)
+
+        var inner = Document()
+        switch query.operation {
+        case .find:
+            inner["find"] = target.collection
+            inner["filter"] = try BSONBridge.document(fromJSON: query.body)
+            if let skip = query.skip { inner["skip"] = skip }
+            if let limit = query.limit { inner["limit"] = limit }
+        case .aggregate:
+            var stages = try BSONBridge.pipeline(fromJSON: query.body)
+            if let skip = query.skip { stages.append(["$skip": skip]) }
+            if let limit = query.limit { stages.append(["$limit": limit]) }
+            inner["aggregate"] = target.collection
+            inner["pipeline"] = try Document(array: stages)
+            inner["cursor"] = Document()
+        case .count:
+            inner["count"] = target.collection
+            inner["query"] = try BSONBridge.document(fromJSON: query.body)
+        }
+
+        var command = Document()
+        command["explain"] = inner
+        command["verbosity"] = analyze ? "executionStats" : "queryPlanner"
+
+        do {
+            let connection = try await connected.pool.next(for: .basic)
+            let reply = try await connection.execute(
+                command,
+                namespace: MongoNamespace(to: "$cmd", inDatabase: target.database))
+            guard let document = reply.documents.first else {
+                throw DBError(
+                    kind: .queryFailed, message: "Empty explain reply")
+            }
+            let ok = BSONBridge.dbValue(primitive: document["ok"]).doubleValue
+            if let ok, ok != 1 {
+                throw DBError(
+                    kind: .queryFailed,
+                    message: (document["errmsg"] as? String) ?? "Explain failed")
+            }
+            return BSONBridge.dbValue(document)
+        } catch let error as DBError {
+            throw error
+        } catch {
+            throw Self.queryError(error)
         }
     }
 
