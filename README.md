@@ -1,3 +1,5 @@
+<p align="center"><img src="Resources/AppIcon_1024.png" width="128" alt="dbosk icon"></p>
+
 # dbosk
 
 A native macOS database client (SwiftUI + AppKit) for PostgreSQL, MySQL/MariaDB,
