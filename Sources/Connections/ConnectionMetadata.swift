@@ -126,6 +126,40 @@ public struct ConnectionMetadata: Codable, Sendable, Equatable {
     public var groupNames: [String] {
         Array(Set(tables.values.compactMap(\.group))).sorted()
     }
+
+    // MARK: Subtree visibility
+    //
+    // Hidden schemas/databases are one entry at their own path — never a
+    // flag per descendant table — so these scans touch only stored
+    // annotations, not every table in the database.
+
+    /// True when any stored entry strictly below `path` is hidden.
+    public func hasHiddenDescendants(of path: [String]) -> Bool {
+        let prefix = Self.key(for: path) + "\u{1F}"
+        return tables.contains { $0.key.hasPrefix(prefix) && $0.value.hidden }
+    }
+
+    /// Clears the hidden flag on every stored entry strictly below `path`,
+    /// pruning entries that become empty.
+    public mutating func unhideDescendants(of path: [String]) {
+        let prefix = Self.key(for: path) + "\u{1F}"
+        for key in Array(tables.keys) where key.hasPrefix(prefix) {
+            clearHidden(at: key)
+        }
+    }
+
+    /// Clears every hidden flag on the connection (tables and schemas).
+    public mutating func unhideAll() {
+        for key in Array(tables.keys) {
+            clearHidden(at: key)
+        }
+    }
+
+    private mutating func clearHidden(at key: String) {
+        guard var meta = tables[key], meta.hidden else { return }
+        meta.hidden = false
+        tables[key] = meta.isEmpty ? nil : meta
+    }
 }
 
 /// Loads/saves per-profile metadata JSON files.

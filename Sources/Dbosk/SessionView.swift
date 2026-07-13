@@ -192,9 +192,11 @@ struct SidebarView: View {
                 }
             }
             Section {
-                ForEach(session.rootNamespaces.map {
-                    SidebarNode(kind: .namespace($0, parent: nil), session: session)
-                }) { node in
+                ForEach(session.rootNamespaces
+                    .filter { SidebarNode.isShown($0, in: session) }
+                    .map {
+                        SidebarNode(kind: .namespace($0, parent: nil), session: session)
+                    }) { node in
                     outlineRow(node)
                 }
             } header: {
@@ -418,15 +420,50 @@ struct SidebarView: View {
         .help("Show or hide all tables in \(name)")
     }
 
+    /// Checkbox for a schema/database. Hiding sets one flag on the namespace
+    /// itself (cheap even with thousands of tables, and no children need to
+    /// be loaded); the mixed state means "visible, but something inside is
+    /// hidden" and clicking it unhides the whole subtree.
+    private func namespaceCheckbox(_ namespace: DBCore.Namespace) -> some View {
+        let isHidden = session.isHidden(namespace)
+        let mixed = !isHidden && session.hasHiddenDescendants(namespace)
+        let symbol = isHidden
+            ? "square"
+            : (mixed ? "minus.square.fill" : "checkmark.square.fill")
+        return Button {
+            if isHidden {
+                session.setHidden(false, for: namespace)
+            } else if mixed {
+                session.unhideAll(in: namespace)
+            } else {
+                session.setHidden(true, for: namespace)
+            }
+        } label: {
+            Image(systemName: symbol)
+                .foregroundStyle(isHidden ? .secondary : Color.accentColor)
+        }
+        .buttonStyle(.borderless)
+        .help("Show or hide \(namespace.name) and everything in it")
+    }
+
+    private func kindLabel(for namespace: DBCore.Namespace) -> String {
+        namespace.kind == .database ? "Database" : "Schema"
+    }
+
     private func namespaceRow(
         _ namespace: DBCore.Namespace, parent: DBCore.Namespace?
     ) -> some View {
         let isHidden = session.isHidden(namespace)
         let note = session.note(for: namespace)
+        let isTable = namespace.kind.isTable
         return HStack(spacing: 4) {
-            if session.editingVisibility, namespace.kind.isTable {
-                Image(systemName: isHidden ? "square" : "checkmark.square.fill")
-                    .foregroundStyle(isHidden ? .secondary : Color.accentColor)
+            if session.editingVisibility {
+                if isTable {
+                    Image(systemName: isHidden ? "square" : "checkmark.square.fill")
+                        .foregroundStyle(isHidden ? .secondary : Color.accentColor)
+                } else {
+                    namespaceCheckbox(namespace)
+                }
             }
             Label(namespace.name, systemImage: SidebarNode.icon(for: namespace))
                 .foregroundStyle(isHidden ? .tertiary : .primary)
@@ -444,7 +481,7 @@ struct SidebarView: View {
         .help(note ?? "")
         .contentShape(Rectangle())
         .modifier(TableTapModifier(
-            isTable: namespace.kind.isTable,
+            isTable: isTable,
             action: {
                 if session.editingVisibility {
                     session.setHidden(!isHidden, for: namespace)
@@ -457,6 +494,11 @@ struct SidebarView: View {
                 tableContextMenu(namespace, parent: parent)
             } else {
                 Button("New Query") { session.openQueryTab() }
+                Button(isHidden
+                    ? "Unhide \(kindLabel(for: namespace))"
+                    : "Hide \(kindLabel(for: namespace))") {
+                    session.setHidden(!isHidden, for: namespace)
+                }
                 Button("Show All Tables") { session.unhideAll(in: namespace) }
                 if session.descriptor.supportsDDL {
                     Divider()
@@ -551,7 +593,7 @@ struct SidebarNode: @MainActor Identifiable {
                 return []
             }
             var nodes: [SidebarNode] = loaded
-                .filter { !$0.kind.isTable }
+                .filter { !$0.kind.isTable && Self.isShown($0, in: session) }
                 .map { SidebarNode(kind: .namespace($0, parent: namespace), session: session) }
             let tables = visibleTables(of: namespace)
             let groups = Set(tables.compactMap { session.group(for: $0) }).sorted()
@@ -568,10 +610,17 @@ struct SidebarNode: @MainActor Identifiable {
     private func visibleTables(of parent: DBCore.Namespace) -> [DBCore.Namespace] {
         (session.children[parent.id] ?? [])
             .filter(\.kind.isTable)
-            .filter {
-                session.editingVisibility || session.showHiddenTables
-                    || !session.isHidden($0)
-            }
+            .filter { Self.isShown($0, in: session) }
+    }
+
+    /// Whether a namespace (table, schema, or database) appears in the
+    /// sidebar: always in edit mode or with hidden items revealed, otherwise
+    /// only when not hidden.
+    static func isShown(
+        _ namespace: DBCore.Namespace, in session: ConnectionSession
+    ) -> Bool {
+        session.editingVisibility || session.showHiddenTables
+            || !session.isHidden(namespace)
     }
 
     static func icon(for namespace: DBCore.Namespace) -> String {
@@ -658,20 +707,84 @@ struct NoteEditorView: View {
     }
 }
 
-/// Picks the right renderer: document-shaped results (Mongo) get the
-/// two-column list + tree view, everything else the flat table.
+/// How a result set is rendered, switchable for every provider type.
+enum ResultsViewMode: String, CaseIterable {
+    case table = "Table"
+    case tree = "Tree"
+    case json = "JSON"
+
+    static func isDocumentShaped(_ columns: [ColumnMeta]) -> Bool {
+        columns.count == 1 && columns[0].dbTypeName == "document"
+    }
+
+    /// Shape-based default until the user picks explicitly: document-shaped
+    /// results (Mongo) open in the tree, tabular results in the flat table.
+    static func effective(
+        _ selected: ResultsViewMode?, columns: [ColumnMeta]
+    ) -> ResultsViewMode {
+        selected ?? (isDocumentShaped(columns) ? .tree : .table)
+    }
+}
+
+/// Table / Tree / JSON segmented toggle, shown in the results status row.
+struct ResultsViewModePicker: View {
+    @Binding var selection: ResultsViewMode?
+    let columns: [ColumnMeta]
+
+    var body: some View {
+        Picker("View", selection: Binding(
+            get: { ResultsViewMode.effective(selection, columns: columns) },
+            set: { selection = $0 }
+        )) {
+            ForEach(ResultsViewMode.allCases, id: \.self) {
+                Text($0.rawValue).tag($0)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .fixedSize()
+        .help("Switch between table, tree, and raw JSON view")
+    }
+}
+
+/// Renders a result set in the given mode. Tabular rows are wrapped as one
+/// document per row for the tree/JSON modes; the mode toggle itself lives in
+/// the enclosing view's status row (`ResultsViewModePicker`).
 struct ResultsArea: View {
     let columns: [ColumnMeta]
     let rows: [ResultRow]
     let version: Int
+    let mode: ResultsViewMode
     var editing: ResultsTableView.EditingConfig?
 
+    private var isDocumentShaped: Bool {
+        ResultsViewMode.isDocumentShaped(columns)
+    }
+
     var body: some View {
-        if columns.count == 1, columns[0].dbTypeName == "document" {
-            DocumentResultsView(rows: rows)
-        } else {
+        switch mode {
+        case .table:
             ResultsTableView(
                 columns: columns, rows: rows, version: version, editing: editing)
+        case .tree:
+            DocumentResultsView(rows: documentRows, detailMode: .tree)
+        case .json:
+            DocumentResultsView(rows: documentRows, detailMode: .json)
+        }
+    }
+
+    /// Document-shaped results pass through; tabular rows become one
+    /// `{column: value}` document each so the tree/JSON renderers apply.
+    private var documentRows: [ResultRow] {
+        if isDocumentShaped { return rows }
+        return rows.map { row in
+            var doc: [String: DBValue] = [:]
+            for (index, column) in columns.enumerated()
+            where index < row.values.count {
+                doc[column.name] = row.values[index]
+            }
+            return ResultRow(id: row.id, values: [.document(doc)])
         }
     }
 }
@@ -683,6 +796,9 @@ struct QueryView: View {
     let session: ConnectionSession
     @State private var savingQuery = false
     @State private var savedQueryName = ""
+    /// nil until the user picks explicitly, so the shape-based default
+    /// still applies when the tab switches between result shapes.
+    @State private var viewMode: ResultsViewMode?
 
     var body: some View {
         VSplitView {
@@ -691,7 +807,9 @@ struct QueryView: View {
                     .frame(minHeight: 80)
                 statusBar
             }
-            ResultsArea(columns: tab.columns, rows: tab.rows, version: tab.resultVersion)
+            ResultsArea(
+                columns: tab.columns, rows: tab.rows, version: tab.resultVersion,
+                mode: ResultsViewMode.effective(viewMode, columns: tab.columns))
                 .frame(minHeight: 120)
         }
         .toolbar {
@@ -783,6 +901,7 @@ struct QueryView: View {
             }
             Spacer()
             ExportStatusView(tab: tab)
+            ResultsViewModePicker(selection: $viewMode, columns: tab.columns)
         }
         .font(.caption)
         .padding(.horizontal, 8)

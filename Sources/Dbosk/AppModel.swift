@@ -318,12 +318,17 @@ final class ConnectionSession: Identifiable {
         persistMetadata()
     }
 
+    /// Unhides `parent` itself and everything stored below it. Prefix-scans
+    /// stored metadata entries, so cost is independent of table count.
     func unhideAll(in parent: Namespace) {
-        for sibling in children[parent.id] ?? [] {
-            guard case .table = sibling.kind else { continue }
-            metadata.update(sibling.path) { $0.hidden = false }
-        }
+        metadata.update(parent.path) { $0.hidden = false }
+        metadata.unhideDescendants(of: parent.path)
         persistMetadata()
+    }
+
+    /// True when any table or schema below `namespace` is hidden.
+    func hasHiddenDescendants(_ namespace: Namespace) -> Bool {
+        metadata.hasHiddenDescendants(of: namespace.path)
     }
 
     /// Tables of a parent, ignoring visibility (for the edit-mode checklist).
@@ -331,11 +336,16 @@ final class ConnectionSession: Identifiable {
         (children[parent.id] ?? []).filter(\.kind.isTable)
     }
 
-    /// Sets visibility for every loaded table across all expanded parents.
+    /// "All" clears every hidden flag (tables and schemas alike); "None"
+    /// hides every loaded table.
     func setAllTablesVisible(_ visible: Bool) {
-        for siblings in children.values {
-            for namespace in siblings where namespace.kind.isTable {
-                metadata.update(namespace.path) { $0.hidden = !visible }
+        if visible {
+            metadata.unhideAll()
+        } else {
+            for siblings in children.values {
+                for namespace in siblings where namespace.kind.isTable {
+                    metadata.update(namespace.path) { $0.hidden = true }
+                }
             }
         }
         persistMetadata()

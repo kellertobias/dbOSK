@@ -3,14 +3,15 @@ import SwiftUI
 
 /// Two-column results for document-shaped rows (MongoDB, jsonb-only results):
 /// a narrow row list on the left, tree or raw-JSON detail on the right.
+/// The tree/JSON choice is owned by the enclosing `ResultsArea` view picker.
 struct DocumentResultsView: View {
     let rows: [ResultRow]
+    var detailMode: DetailMode = .tree
     @State private var selectedRowID: Int?
-    @State private var detailMode: DetailMode = .tree
 
-    enum DetailMode: String, CaseIterable {
-        case tree = "Tree"
-        case json = "JSON"
+    enum DetailMode {
+        case tree
+        case json
     }
 
     var body: some View {
@@ -46,18 +47,6 @@ struct DocumentResultsView: View {
     private var detail: some View {
         if let value = selectedValue {
             VStack(spacing: 0) {
-                HStack {
-                    Picker("", selection: $detailMode) {
-                        ForEach(DetailMode.allCases, id: \.self) {
-                            Text($0.rawValue).tag($0)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 160)
-                    Spacer()
-                }
-                .padding(6)
-                Divider()
                 switch detailMode {
                 case .tree:
                     ScrollView {

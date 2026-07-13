@@ -100,4 +100,59 @@ import Testing
         #expect(ConnectionMetadata.key(for: ["a.b", "c"])
             != ConnectionMetadata.key(for: ["a", "b.c"]))
     }
+
+    @Test func hasHiddenDescendantsIsStrictlyBelow() {
+        var metadata = ConnectionMetadata()
+        #expect(!metadata.hasHiddenDescendants(of: ["public"]))
+
+        // A hidden schema is not its own descendant.
+        metadata.update(["public"]) { $0.hidden = true }
+        #expect(!metadata.hasHiddenDescendants(of: ["public"]))
+
+        metadata.update(["public", "users"]) { $0.hidden = true }
+        #expect(metadata.hasHiddenDescendants(of: ["public"]))
+        // A sibling schema sharing the name prefix must not match.
+        #expect(!metadata.hasHiddenDescendants(of: ["pub"]))
+        // Non-hidden annotations don't count.
+        metadata.update(["other", "notes_only"]) { $0.note = "x" }
+        #expect(!metadata.hasHiddenDescendants(of: ["other"]))
+    }
+
+    @Test func unhideDescendantsClearsSubtreeOnly() {
+        var metadata = ConnectionMetadata()
+        metadata.update(["public"]) { $0.hidden = true }
+        metadata.update(["public", "users"]) {
+            $0.hidden = true
+            $0.note = "keep me"
+        }
+        metadata.update(["public", "audit_log"]) { $0.hidden = true }
+        metadata.update(["other", "secrets"]) { $0.hidden = true }
+
+        metadata.unhideDescendants(of: ["public"])
+
+        // The subtree is visible again; unrelated paths and the node's own
+        // flag are untouched; note survives, flag-only entry is pruned.
+        #expect(metadata.meta(for: ["public"]).hidden)
+        #expect(!metadata.meta(for: ["public", "users"]).hidden)
+        #expect(metadata.meta(for: ["public", "users"]).note == "keep me")
+        #expect(metadata.tables[ConnectionMetadata.key(for: ["public", "audit_log"])] == nil)
+        #expect(metadata.meta(for: ["other", "secrets"]).hidden)
+    }
+
+    @Test func unhideAllClearsEveryFlag() {
+        var metadata = ConnectionMetadata()
+        metadata.update(["public"]) { $0.hidden = true }
+        metadata.update(["public", "users"]) { $0.hidden = true }
+        metadata.update(["other", "t"]) {
+            $0.hidden = true
+            $0.group = "Core"
+        }
+
+        metadata.unhideAll()
+
+        #expect(metadata.tables.values.allSatisfy { !$0.hidden })
+        // Grouping survives; flag-only entries are pruned.
+        #expect(metadata.meta(for: ["other", "t"]).group == "Core")
+        #expect(metadata.tables.count == 1)
+    }
 }

@@ -8,6 +8,9 @@ struct TableModeView: View {
     var session: ConnectionSession?
     /// Statements shown in the pre-apply SQL preview sheet.
     @State private var applyPreview: SQLApplyPreview?
+    /// nil until the user picks explicitly, so the shape-based default
+    /// still applies when the browsed table changes shape.
+    @State private var viewMode: ResultsViewMode?
 
     private struct SQLApplyPreview: Identifiable {
         let id = UUID()
@@ -29,6 +32,8 @@ struct TableModeView: View {
                         columns: browser.resultTab.columns,
                         rows: browser.displayRows,
                         version: browser.displayVersion,
+                        mode: ResultsViewMode.effective(
+                            viewMode, columns: browser.resultTab.columns),
                         editing: browser.editingConfig)
                     statusBar
                 } else {
@@ -332,6 +337,8 @@ struct TableModeView: View {
             }
             Spacer()
             ExportStatusView(tab: browser.resultTab)
+            ResultsViewModePicker(
+                selection: $viewMode, columns: browser.resultTab.columns)
         }
         .font(.caption)
         .padding(.horizontal, 8)
