@@ -25,11 +25,15 @@ struct ConnectionListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List {
-                ForEach(groupedProfiles, id: \.group) { section in
-                    Section(section.group ?? "Connections") {
-                        ForEach(section.profiles) { profile in
-                            row(for: profile)
+            if appModel.profiles.isEmpty {
+                WelcomeView(showingNewProfile: $showingNewProfile)
+            } else {
+                List {
+                    ForEach(groupedProfiles, id: \.group) { section in
+                        Section(section.group ?? "Connections") {
+                            ForEach(section.profiles) { profile in
+                                row(for: profile)
+                            }
                         }
                     }
                 }
@@ -97,6 +101,42 @@ struct ConnectionListView: View {
         }
         if let database = profile.database { parts.append(database) }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Shown in place of the connection list when there are no connections yet.
+private struct WelcomeView: View {
+    @Binding var showingNewProfile: Bool
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 128, height: 128)
+                .grayscale(1)
+                .opacity(0.35)
+            VStack(spacing: 6) {
+                Text("Welcome to dbOSK")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("Create your first database connection to start")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                showingNewProfile = true
+            } label: {
+                Label("New Connection", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            Spacer()
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 }
 

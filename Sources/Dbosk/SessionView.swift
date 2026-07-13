@@ -10,12 +10,11 @@ struct SessionView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Always-visible environment stripe (e.g. red = production).
-            if let label = appModel.label(for: session.profile) {
-                Rectangle()
-                    .fill(label.colorTag.color)
-                    .frame(height: 3)
-            }
+            // Always-visible environment stripe (e.g. red = production);
+            // neutral gray when the connection has no label.
+            Rectangle()
+                .fill(appModel.label(for: session.profile)?.colorTag.color ?? .unlabeledStripe)
+                .frame(height: 3)
             NavigationSplitView {
                 SidebarView(session: session)
                     .navigationSplitViewColumnWidth(min: 180, ideal: 240)

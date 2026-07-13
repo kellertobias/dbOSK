@@ -1,3 +1,4 @@
+import AppKit
 import Connections
 import SwiftUI
 
@@ -15,6 +16,19 @@ extension ColorTag {
     }
 
     var displayName: String { rawValue.capitalized }
+}
+
+extension Color {
+    /// Neutral top-of-window stripe for connections without a label — light
+    /// gray on dark backgrounds, dark gray on light backgrounds, so it always
+    /// reads as a subtle accent rather than a colored one.
+    static var unlabeledStripe: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(white: 0.75, alpha: 1)
+                : NSColor(white: 0.35, alpha: 1)
+        })
+    }
 }
 
 /// A named, colored pill for a connection label. Deliberately not a dot — a dot
