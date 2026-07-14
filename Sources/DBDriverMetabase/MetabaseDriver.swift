@@ -70,6 +70,10 @@ public actor MetabaseDriver: DatabaseDriver {
 
     private let config: ResolvedConnectionConfig
     private let client: any MetabaseHTTPClient
+    /// Current Metabase session token (`X-Metabase-Session`). Starts from the
+    /// resolved credential and can be refreshed in place after an interactive
+    /// re-login, so an open session recovers without reconnecting.
+    private var sessionToken: String?
 
     /// One Metabase database as the sidebar sees it. `engine` selects the SQL
     /// dialect for generated browse queries.
@@ -89,12 +93,20 @@ public actor MetabaseDriver: DatabaseDriver {
     public init(config: ResolvedConnectionConfig) throws {
         self.config = config
         self.client = URLSessionMetabaseHTTPClient()
+        self.sessionToken = config.password
     }
 
     /// Test entry point with an injected transport.
     public init(config: ResolvedConnectionConfig, client: any MetabaseHTTPClient) {
         self.config = config
         self.client = client
+        self.sessionToken = config.password
+    }
+
+    /// Swaps in a fresh session token from an interactive re-login so the
+    /// live session keeps working after the old token expires.
+    public func updateAuthToken(_ token: String) async {
+        sessionToken = token
     }
 
     // MARK: - Lifecycle
@@ -371,7 +383,7 @@ public actor MetabaseDriver: DatabaseDriver {
             throw DBError(kind: .connectionFailed, message: "Invalid Metabase URL \"\(host)\"")
         }
 
-        guard let token = config.password?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let token = sessionToken?.trimmingCharacters(in: .whitespacesAndNewlines),
               !token.isEmpty
         else {
             throw DBError(

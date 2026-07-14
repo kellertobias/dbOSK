@@ -1,12 +1,20 @@
 import AppKit
 import Connections
 import DBCore
+import DBDriverMetabase
 import Export
 import SwiftUI
 
 struct SessionView: View {
     @Environment(AppModel.self) private var appModel
     @Bindable var session: ConnectionSession
+    @State private var showingReauth = false
+
+    /// The Metabase base URL for re-login, when the profile has a usable one.
+    private var reauthURL: URL? {
+        guard session.profile.driverID == MetabaseDriver.descriptor.id else { return nil }
+        return MetabaseURL.normalized(session.profile.host)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,6 +23,9 @@ struct SessionView: View {
             Rectangle()
                 .fill(appModel.label(for: session.profile)?.colorTag.color ?? .unlabeledStripe)
                 .frame(height: 3)
+            if session.authExpired, reauthURL != nil {
+                reauthBanner
+            }
             NavigationSplitView {
                 SidebarView(session: session)
                     .navigationSplitViewColumnWidth(min: 180, ideal: 240)
@@ -46,6 +57,42 @@ struct SessionView: View {
         .task { await session.loadRoot() }
         // Closing the window ends the session — no separate disconnect control.
         .onDisappear { appModel.disconnect(profileID: session.profile.id) }
+        .sheet(isPresented: $showingReauth) {
+            if let url = reauthURL {
+                MetabaseLoginSheet(baseURL: url) { token in
+                    showingReauth = false
+                    Task {
+                        do {
+                            try appModel.keychain.setPassword(token, for: session.profile.id)
+                        } catch {
+                            session.sidebarError = """
+                                Signed in, but the new session token could not be \
+                                saved: \(error.localizedDescription)
+                                """
+                        }
+                        await session.refreshAuthToken(token)
+                        session.sidebarError = nil
+                        await session.loadRoot()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Shown when the Metabase session expired mid-use: one click re-runs the
+    /// SSO login and refreshes the live token in place.
+    private var reauthBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("Your Metabase session has expired.")
+            Spacer()
+            Button("Sign In Again") { showingReauth = true }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.12))
     }
 
     /// Leading toolbar title: "Group: Name" on one line, with the label badge

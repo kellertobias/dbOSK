@@ -250,7 +250,26 @@ final class ConnectionSession: Identifiable {
     var editingVisibility = false {
         didSet { invalidateSidebarNodes() }
     }
+    /// Set when a live operation fails because the auth session expired. Drives
+    /// the "Sign In Again" banner; only reachable for drivers whose token can
+    /// be refreshed in place (Metabase).
+    var authExpired = false
     private let metadataStore = MetadataStore()
+
+    /// Flips `authExpired` when `error` signals an expired auth session, so any
+    /// failing operation (sidebar load, query) surfaces the same re-login path.
+    func noteAuthExpiry(_ error: Error) {
+        if let dbError = error as? DBError, dbError.kind == .authenticationExpired {
+            authExpired = true
+        }
+    }
+
+    /// Applies a fresh token to the live driver after re-login and clears the
+    /// expired state, so the existing session and its tabs keep working.
+    func refreshAuthToken(_ token: String) async {
+        await driver.updateAuthToken(token)
+        authExpired = false
+    }
 
     /// Memoized sidebar structure per parent node id. SwiftUI re-evaluates
     /// the outline on every render pass; with thousands of tables the
@@ -611,6 +630,7 @@ final class ConnectionSession: Identifiable {
         browser.resultTab.onExecuted = { [weak self] text, succeeded in
             self?.recordHistory(text: text, succeeded: succeeded)
         }
+        browser.resultTab.onAuthExpired = { [weak self] in self?.authExpired = true }
         // When generated SQL cannot name the table's database, every data
         // query (initial load, pagination, refresh) must first point the
         // connection at it — the driver routes by active namespace.
@@ -690,6 +710,7 @@ final class ConnectionSession: Identifiable {
         queryTab.onExecuted = { [weak self] text, succeeded in
             self?.recordHistory(text: text, succeeded: succeeded)
         }
+        queryTab.onAuthExpired = { [weak self] in self?.authExpired = true }
         let tab = WorkTab(title: "Query", content: .query(queryTab))
         tabs.append(tab)
         selectedTabID = tab.id
@@ -712,6 +733,7 @@ final class ConnectionSession: Identifiable {
             applyDefaultRootVisibility()
         } catch {
             sidebarError = String(describing: error)
+            noteAuthExpiry(error)
         }
     }
 
@@ -745,6 +767,7 @@ final class ConnectionSession: Identifiable {
             invalidateSidebarNodes()
         } catch {
             sidebarError = String(describing: error)
+            noteAuthExpiry(error)
         }
     }
 
@@ -834,6 +857,10 @@ final class QueryTab {
     /// session hooks this to record history.
     var onExecuted: ((String, Bool) -> Void)?
 
+    /// Invoked when an execution fails because the auth session expired — the
+    /// session hooks this to raise its re-login banner.
+    var onAuthExpired: (@MainActor () -> Void)?
+
     /// When set, `run()` executes this structured query instead of `queryText`.
     /// Table mode uses it for drivers that generate their own browse SQL.
     var browseRequest: DriverQuery?
@@ -886,6 +913,10 @@ final class QueryTab {
             } catch {
                 self.runState = .failed(String(describing: error))
                 self.onExecuted?(sql, false)
+                if let dbError = error as? DBError,
+                   dbError.kind == .authenticationExpired {
+                    self.onAuthExpired?()
+                }
             }
             self.cancelHandler = nil
         }

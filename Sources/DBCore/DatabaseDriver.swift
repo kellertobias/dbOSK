@@ -464,6 +464,12 @@ public protocol DatabaseDriver: Sendable {
     /// the `explain` database command.
     func explain(_ query: DriverQuery, analyze: Bool) async throws -> ExplainPlan
 
+    /// Replaces the driver's auth token after an interactive re-login (e.g. a
+    /// fresh Metabase SSO session), so a live session recovers from expiry
+    /// without reconnecting. Defaults to a no-op for drivers without a
+    /// refreshable token.
+    func updateAuthToken(_ token: String) async
+
     /// Points unqualified SQL names at `name` for the rest of the session
     /// (`SET search_path` / `USE`); nil restores the connection default.
     /// Only meaningful when the descriptor advertises `activeNamespaceKind`.
@@ -472,6 +478,8 @@ public protocol DatabaseDriver: Sendable {
 }
 
 extension DatabaseDriver {
+    public func updateAuthToken(_ token: String) async {}
+
     public func describeTable(_ table: Namespace) async throws -> TableStructure {
         let columns = try await listColumns(of: table)
         return TableStructure(
