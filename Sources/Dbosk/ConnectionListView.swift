@@ -2,6 +2,7 @@ import AppKit
 import Connections
 import DBCore
 import DBDriverDynamoDB
+import DBDriverMetabase
 import DBDriverPostgres
 import DBDriverSQLite
 import SwiftUI
@@ -61,6 +62,24 @@ struct ConnectionListView: View {
         }
         .sheet(item: $editingProfile) { profile in
             ConnectionEditView(profile: profile)
+        }
+        // A connect hit an expired/missing Metabase session: run the SSO
+        // login, store the fresh token, and retry the connect.
+        .sheet(item: Binding(
+            get: { appModel.metabaseLoginRequest },
+            set: { appModel.metabaseLoginRequest = $0 }
+        )) { profile in
+            if let url = profile.host.flatMap(URL.init(string:)) {
+                MetabaseLoginSheet(baseURL: url) { token in
+                    try? appModel.keychain.setPassword(token, for: profile.id)
+                    appModel.metabaseLoginRequest = nil
+                    Task {
+                        if await appModel.connect(to: profile) {
+                            openWindow(value: profile.id)
+                        }
+                    }
+                }
+            }
         }
         .frame(minWidth: 480, minHeight: 320)
     }
@@ -176,8 +195,20 @@ struct ConnectionEditView: View {
     @State private var tunnelPort = ""
     @State private var tunnelUser = ""
     @State private var tunnelIdentity = ""
+    @State private var metabaseToken = ""
+    @State private var metabaseHasStoredToken = false
+    @State private var showingMetabaseLogin = false
 
     private var isFileBased: Bool { driverID == SQLiteDriver.descriptor.id }
+    private var isMetabase: Bool { driverID == MetabaseDriver.descriptor.id }
+
+    /// The Metabase base URL, when the host field parses as one.
+    private var metabaseBaseURL: URL? {
+        guard !host.isEmpty, let url = URL(string: host),
+              url.scheme != nil, url.host() != nil
+        else { return nil }
+        return url
+    }
 
     enum CredentialMode: String, CaseIterable {
         case none = "None"
@@ -241,6 +272,31 @@ struct ConnectionEditView: View {
                                 "Path", text: $filePath,
                                 prompt: Text("~/path/to/database.sqlite"))
                             Button("Choose…") { chooseFile() }
+                        }
+                    }
+                } else if isMetabase {
+                    // Metabase talks HTTPS to the instance URL and
+                    // authenticates with a browser SSO session token, so the
+                    // host/port/user/TLS/tunnel fields don't apply.
+                    TextField(
+                        "Metabase URL", text: $host,
+                        prompt: Text("https://metabase.example.com"))
+                    LabeledContent("Sign In") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button(metabaseHasStoredToken
+                                ? "Sign In Again…" : "Sign In with SSO…") {
+                                showingMetabaseLogin = true
+                            }
+                            .disabled(metabaseBaseURL == nil)
+                            if !metabaseToken.isEmpty {
+                                Text("Signed in — session token will be stored in the Keychain.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else if metabaseHasStoredToken {
+                                Text("Session token stored.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 } else {
@@ -351,13 +407,22 @@ struct ConnectionEditView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(
                         name.isEmpty || (isFileBased && filePath.isEmpty)
-                            || (!isFileBased && credentialMode == .awsSecret
+                            || (isMetabase && host.isEmpty)
+                            || (!isFileBased && !isMetabase
+                                && credentialMode == .awsSecret
                                 && awsSecretID.isEmpty))
             }
         }
         .padding(20)
         .frame(width: 420)
         .onAppear { populate() }
+        .sheet(isPresented: $showingMetabaseLogin) {
+            if let url = metabaseBaseURL {
+                MetabaseLoginSheet(baseURL: url) { token in
+                    metabaseToken = token
+                }
+            }
+        }
     }
 
     private func chooseIdentityFile() {
@@ -451,7 +516,14 @@ struct ConnectionEditView: View {
             credentialMode = .none
         case .keychain:
             credentialMode = .password
-            password = (try? appModel.keychain.password(for: profile.id)) ?? ""
+            if profile.driverID == MetabaseDriver.descriptor.id {
+                // The session token stays in the Keychain; the form only
+                // needs to know whether one exists.
+                metabaseHasStoredToken =
+                    (try? appModel.keychain.password(for: profile.id))?.isEmpty == false
+            } else {
+                password = (try? appModel.keychain.password(for: profile.id)) ?? ""
+            }
         case .script(let config):
             credentialMode = .script
             scriptPath = config.path
@@ -480,6 +552,8 @@ struct ConnectionEditView: View {
         let source: CredentialSource
         switch credentialMode {
         case _ where isFileBased: source = .none
+        // Metabase always keeps its session token in the Keychain.
+        case _ where isMetabase: source = .keychain
         case .none: source = .none
         case .password: source = .keychain
         case .script:
@@ -507,13 +581,13 @@ struct ConnectionEditView: View {
             labelID: labelID,
             driverID: driverID,
             host: isFileBased || host.isEmpty ? nil : host,
-            port: isFileBased ? nil : Int(port),
-            user: isFileBased || user.isEmpty ? nil : user,
-            database: isFileBased || database.isEmpty ? nil : database,
+            port: isFileBased || isMetabase ? nil : Int(port),
+            user: isFileBased || isMetabase || user.isEmpty ? nil : user,
+            database: isFileBased || isMetabase || database.isEmpty ? nil : database,
             filePath: isFileBased && !filePath.isEmpty ? filePath : nil,
             tls: tls,
             credentialSource: source,
-            sshTunnel: !isFileBased && tunnelEnabled && !tunnelHost.isEmpty
+            sshTunnel: !isFileBased && !isMetabase && tunnelEnabled && !tunnelHost.isEmpty
                 ? SSHTunnelConfig(
                     host: tunnelHost,
                     port: Int(tunnelPort) ?? 22,
@@ -521,9 +595,17 @@ struct ConnectionEditView: View {
                     identityFile: tunnelIdentity.isEmpty ? nil : tunnelIdentity)
                 : nil
         )
-        appModel.upsert(
-            updated,
-            password: !isFileBased && credentialMode == .password ? password : nil)
+        // Metabase saves the freshly captured session token (if any); a save
+        // without a new sign-in keeps whatever the Keychain already holds.
+        let secret: String?
+        if isMetabase {
+            secret = metabaseToken.isEmpty ? nil : metabaseToken
+        } else if !isFileBased && credentialMode == .password {
+            secret = password
+        } else {
+            secret = nil
+        }
+        appModel.upsert(updated, password: secret)
         dismiss()
     }
 }

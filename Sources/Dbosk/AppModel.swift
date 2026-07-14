@@ -2,6 +2,7 @@ import Connections
 import DBCore
 import Export
 import DBDriverDynamoDB
+import DBDriverMetabase
 import DBDriverMongo
 import DBDriverMySQL
 import DBDriverPostgres
@@ -20,6 +21,7 @@ final class AppModel {
         SQLiteDriver.descriptor,
         RedisDriver.descriptor,
         DynamoDBDriver.descriptor,
+        MetabaseDriver.descriptor,
     ]
 
     var profiles: [ConnectionProfile] = []
@@ -29,6 +31,9 @@ final class AppModel {
     var sessions: [UUID: ConnectionSession] = [:]
     var connectionError: String?
     var isConnecting = false
+    /// Set when a connect failed because the Metabase session token was
+    /// rejected; the connection list presents the SSO login sheet for it.
+    var metabaseLoginRequest: ConnectionProfile?
 
     private let profileStore = ProfileStore()
     private let labelStore = LabelStore()
@@ -142,8 +147,10 @@ final class AppModel {
 
             // Route through an SSH tunnel first when configured: forward a
             // local port to the (resolved) database host and rewrite the
-            // config to point at it.
-            if let tunnelConfig = profile.sshTunnel, config.filePath == nil {
+            // config to point at it. Metabase is excluded — its "host" is an
+            // HTTPS base URL, not a TCP endpoint the tunnel could forward to.
+            if let tunnelConfig = profile.sshTunnel, config.filePath == nil,
+               profile.driverID != MetabaseDriver.descriptor.id {
                 let descriptor = AppModel.availableDrivers
                     .first { $0.id == profile.driverID }
                 let targetPort = config.port ?? descriptor?.defaultPort ?? 0
@@ -164,6 +171,13 @@ final class AppModel {
             return true
         } catch {
             tunnel?.stop()
+            // An expired/missing Metabase session gets a fresh SSO login
+            // prompt instead of a raw error message.
+            if let dbError = error as? DBError, dbError.kind == .authenticationExpired,
+               let host = profile.host, URL(string: host) != nil {
+                metabaseLoginRequest = profile
+                return false
+            }
             var message = String(describing: error)
             if let credentialDiagnostics {
                 message += "\n\(credentialDiagnostics)"
@@ -195,6 +209,8 @@ final class AppModel {
             return try RedisDriver(config: config)
         case DynamoDBDriver.descriptor.id:
             return try DynamoDBDriver(config: config)
+        case MetabaseDriver.descriptor.id:
+            return try MetabaseDriver(config: config)
         default:
             throw DBError(
                 kind: .unsupported,
@@ -654,9 +670,28 @@ final class ConnectionSession: Identifiable {
     func loadRoot() async {
         do {
             rootNamespaces = try await driver.listNamespaces(parent: nil)
+            applyDefaultRootVisibility()
         } catch {
             sidebarError = String(describing: error)
         }
+    }
+
+    /// Metabase lists every database the instance exposes — often dozens —
+    /// so a fresh connection starts with all of them hidden and the sidebar
+    /// offers "Choose Databases…" instead. Only applies when the metadata
+    /// holds no entry for any root database yet, so an explicit user choice
+    /// (including "show everything") is never overridden on reconnect.
+    private func applyDefaultRootVisibility() {
+        guard descriptor.id == MetabaseDriver.descriptor.id else { return }
+        let roots = rootNamespaces.filter { $0.kind == .database }
+        guard !roots.isEmpty,
+              roots.allSatisfy({ metadata.tables[$0.pathKey] == nil })
+        else { return }
+        for root in roots {
+            metadata.update(root.path) { $0.hidden = true }
+        }
+        invalidateSidebarNodes()
+        persistMetadata()
     }
 
     func loadChildren(of namespace: Namespace) async {

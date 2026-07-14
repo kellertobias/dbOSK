@@ -192,17 +192,25 @@ struct SidebarView: View {
                 }
             }
             Section {
-                ForEach(session.sidebarRows(expanded: expandedIDs)) { row in
-                    SidebarOutlineRow(
-                        row: row,
-                        session: session,
-                        isExpanded: row.isExpandable && expandedIDs.contains(row.id),
-                        onToggleExpand: { toggleExpanded(row.id) },
-                        noteTarget: $noteTarget,
-                        groupTarget: $groupTarget,
-                        dropTableRequest: $dropTableRequest,
-                        createTableParent: $createTableParent)
-                        .equatable()
+                let rows = session.sidebarRows(expanded: expandedIDs)
+                // Everything at the root is hidden (Metabase connections
+                // start this way on purpose): point at the visibility editor
+                // instead of showing an empty list.
+                if rows.isEmpty && !session.rootNamespaces.isEmpty {
+                    allHiddenPlaceholder
+                } else {
+                    ForEach(rows) { row in
+                        SidebarOutlineRow(
+                            row: row,
+                            session: session,
+                            isExpanded: row.isExpandable && expandedIDs.contains(row.id),
+                            onToggleExpand: { toggleExpanded(row.id) },
+                            noteTarget: $noteTarget,
+                            groupTarget: $groupTarget,
+                            dropTableRequest: $dropTableRequest,
+                            createTableParent: $createTableParent)
+                            .equatable()
+                    }
                 }
             } header: {
                 HStack(spacing: 8) {
@@ -307,6 +315,22 @@ struct SidebarView: View {
         } message: {
             Text("\(dropTableRequest?.sql ?? "")\n\nThis permanently deletes the table and its data.")
         }
+    }
+
+    /// Shown when every root namespace is hidden and the sidebar is not in
+    /// visibility-edit mode. Edit mode lists all rows (including hidden
+    /// ones) with checkboxes, so entering it is all the button needs to do.
+    private var allHiddenPlaceholder: some View {
+        VStack(spacing: 10) {
+            Text("No databases selected")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("Choose Databases…") { session.editingVisibility = true }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
     }
 
     private var renameAlertShown: Binding<Bool> {
