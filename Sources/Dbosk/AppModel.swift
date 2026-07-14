@@ -147,12 +147,13 @@ final class AppModel {
 
             // Route through an SSH tunnel first when configured: forward a
             // local port to the (resolved) database host and rewrite the
-            // config to point at it. Metabase is excluded — its "host" is an
-            // HTTPS base URL, not a TCP endpoint the tunnel could forward to.
+            // config to point at it. HTTP-API drivers are excluded — their
+            // "host" is a base URL, not a TCP endpoint the tunnel could
+            // forward to.
+            let descriptor = AppModel.availableDrivers
+                .first { $0.id == profile.driverID }
             if let tunnelConfig = profile.sshTunnel, config.filePath == nil,
-               profile.driverID != MetabaseDriver.descriptor.id {
-                let descriptor = AppModel.availableDrivers
-                    .first { $0.id == profile.driverID }
+               descriptor?.supportsSSHTunnel != false {
                 let targetPort = config.port ?? descriptor?.defaultPort ?? 0
                 tunnel = try await SSHTunnel.start(
                     config: tunnelConfig,
@@ -174,7 +175,8 @@ final class AppModel {
             // An expired/missing Metabase session gets a fresh SSO login
             // prompt instead of a raw error message.
             if let dbError = error as? DBError, dbError.kind == .authenticationExpired,
-               let host = profile.host, URL(string: host) != nil {
+               profile.driverID == MetabaseDriver.descriptor.id,
+               MetabaseURL.normalized(profile.host) != nil {
                 metabaseLoginRequest = profile
                 return false
             }
@@ -595,6 +597,15 @@ final class ConnectionSession: Identifiable {
         browser.resultTab.onExecuted = { [weak self] text, succeeded in
             self?.recordHistory(text: text, succeeded: succeeded)
         }
+        // When generated SQL cannot name the table's database, every data
+        // query (initial load, pagination, refresh) must first point the
+        // connection at it — the driver routes by active namespace.
+        if descriptor.activeNamespaceKind != nil,
+           !descriptor.supportsDatabaseQualifiedSQL {
+            browser.prepareForQuery = { [weak self] table in
+                await self?.switchToRootNamespaceIfNeeded(for: table)
+            }
+        }
         let tab = WorkTab(title: namespace.name, content: .table(browser))
         tabs.append(tab)
         selectedTabID = tab.id
@@ -639,6 +650,20 @@ final class ConnectionSession: Identifiable {
         }
     }
 
+    /// Switches the session's active namespace to `namespace`'s root database
+    /// when the driver routes SQL by active namespace instead of a database-
+    /// qualified name (`supportsDatabaseQualifiedSQL == false`). No-op for
+    /// every other driver, or when the root is already active — so callers
+    /// may invoke it unconditionally before running table-scoped SQL.
+    func switchToRootNamespaceIfNeeded(for namespace: Namespace) async {
+        guard descriptor.activeNamespaceKind != nil,
+              !descriptor.supportsDatabaseQualifiedSQL,
+              let root = namespace.path.first,
+              activeNamespace != root
+        else { return }
+        await setActiveNamespace(root)
+    }
+
     /// Opens a new raw-query tab, optionally prefilled and executed.
     func openQueryTab(
         initialSQL: String = "",
@@ -676,21 +701,26 @@ final class ConnectionSession: Identifiable {
         }
     }
 
-    /// Metabase lists every database the instance exposes — often dozens —
-    /// so a fresh connection starts with all of them hidden and the sidebar
-    /// offers "Choose Databases…" instead. Only applies when the metadata
-    /// holds no entry for any root database yet, so an explicit user choice
-    /// (including "show everything") is never overridden on reconnect.
+    /// Drivers that expose an org-wide set of databases (Metabase) list
+    /// dozens of roots, so a fresh connection starts with all of them hidden
+    /// and the sidebar offers "Choose Databases…" instead. Applies exactly
+    /// once per connection — a persisted marker remembers it, so an explicit
+    /// user choice (including "show everything", which prunes the stored
+    /// entries) is never overridden on reconnect.
     private func applyDefaultRootVisibility() {
-        guard descriptor.id == MetabaseDriver.descriptor.id else { return }
+        guard descriptor.rootNamespacesDefaultHidden,
+              !metadata.initialRootVisibilityApplied else { return }
         let roots = rootNamespaces.filter { $0.kind == .database }
-        guard !roots.isEmpty,
-              roots.allSatisfy({ metadata.tables[$0.pathKey] == nil })
-        else { return }
-        for root in roots {
-            metadata.update(root.path) { $0.hidden = true }
+        guard !roots.isEmpty else { return }
+        metadata.initialRootVisibilityApplied = true
+        // Pre-marker metadata that already has a root entry means the user
+        // made a choice on an earlier version: only record the marker.
+        if roots.allSatisfy({ metadata.tables[$0.pathKey] == nil }) {
+            for root in roots {
+                metadata.update(root.path) { $0.hidden = true }
+            }
+            invalidateSidebarNodes()
         }
-        invalidateSidebarNodes()
         persistMetadata()
     }
 
@@ -990,6 +1020,11 @@ final class TableBrowser {
     /// Executes the built query; reuses the streaming runner.
     let resultTab: QueryTab
 
+    /// Awaited before each generated data query runs, so the session can
+    /// point the connection at the table's database first (drivers whose
+    /// generated SQL cannot name it — `supportsDatabaseQualifiedSQL` false).
+    var prepareForQuery: (@MainActor (Namespace) async -> Void)?
+
     private let driver: any DatabaseDriver
     let descriptor: DriverDescriptor
 
@@ -1053,9 +1088,16 @@ final class TableBrowser {
     }
 
     func load() {
-        guard let query = builtQuery else { return }
+        guard let table, let query = builtQuery else { return }
         resultTab.queryText = query
-        resultTab.run()
+        if let prepareForQuery {
+            Task {
+                await prepareForQuery(table)
+                resultTab.run()
+            }
+        } else {
+            resultTab.run()
+        }
     }
 
     /// Switches display mode, fetching the structure on first use.

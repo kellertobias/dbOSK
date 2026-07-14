@@ -193,10 +193,12 @@ struct SidebarView: View {
             }
             Section {
                 let rows = session.sidebarRows(expanded: expandedIDs)
-                // Everything at the root is hidden (Metabase connections
-                // start this way on purpose): point at the visibility editor
-                // instead of showing an empty list.
-                if rows.isEmpty && !session.rootNamespaces.isEmpty {
+                // Everything at the root is hidden (drivers that default-hide
+                // their roots start this way on purpose): point at the
+                // visibility editor instead of showing an empty list. Other
+                // drivers keep a plain empty sidebar.
+                if rows.isEmpty && !session.rootNamespaces.isEmpty
+                    && session.descriptor.rootNamespacesDefaultHidden {
                     allHiddenPlaceholder
                 } else {
                     ForEach(rows) { row in
@@ -545,9 +547,14 @@ private struct TableRowMenu: View {
         Button("Open Table") { session.openTable(namespace) }
         Button("Show Structure") { session.openTable(namespace, mode: .structure) }
         Button("Query Table") {
-            session.openQueryTab(
-                initialSQL: SidebarNode.defaultQuery(for: namespace, in: session),
-                runImmediately: true)
+            // Point the connection at the table's database first when the
+            // generated SQL cannot name it (no-op for other drivers).
+            Task {
+                await session.switchToRootNamespaceIfNeeded(for: namespace)
+                session.openQueryTab(
+                    initialSQL: SidebarNode.defaultQuery(for: namespace, in: session),
+                    runImmediately: true)
+            }
         }
         Divider()
         Button(session.note(for: namespace) == nil ? "Add Note…" : "Edit Note…") {
@@ -638,7 +645,8 @@ enum SidebarNode {
         if descriptor.queryLanguage == .mongo {
             return "db.\(namespace.path.joined(separator: ".")).find({}).limit(100)"
         }
-        let path = namespace.path.map { descriptor.quoted($0) }.joined(separator: ".")
+        let path = descriptor.sqlTablePath(namespace.path)
+            .map { descriptor.quoted($0) }.joined(separator: ".")
         return "SELECT * FROM \(path) LIMIT 100;"
     }
 }

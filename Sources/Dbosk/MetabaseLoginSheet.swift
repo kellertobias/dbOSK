@@ -2,6 +2,24 @@ import AppKit
 import SwiftUI
 import WebKit
 
+/// Normalizes a user-entered Metabase instance address into a loadable base
+/// URL. The driver accepts a bare host ("metabase.example.com") and prepends
+/// https:// itself; every app-side URL use goes through here so a bare host
+/// works everywhere too.
+enum MetabaseURL {
+    /// Trims whitespace and trailing slashes, prepends `https://` when no
+    /// scheme is given, and requires a host. Nil when no valid URL results.
+    static func normalized(_ host: String?) -> URL? {
+        guard var text = host?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        while text.hasSuffix("/") { text.removeLast() }
+        if !text.contains("://") { text = "https://" + text }
+        guard let url = URL(string: text), url.host() != nil else { return nil }
+        return url
+    }
+}
+
 /// Browser-based SSO login for a Metabase instance, meant to be presented in a
 /// `.sheet`.
 ///
@@ -19,29 +37,33 @@ struct MetabaseLoginSheet: View {
     let onToken: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var model: MetabaseLoginModel
-
-    init(baseURL: URL, onToken: @escaping (String) -> Void) {
-        self.baseURL = baseURL
-        self.onToken = onToken
-        _model = State(initialValue: MetabaseLoginModel(baseURL: baseURL))
-    }
+    /// Created once in `onAppear`, not in the view's init: the model owns a
+    /// WKWebView, and `State(initialValue:)` would build (and discard) one on
+    /// every re-render of the presenting view while the sheet is up.
+    @State private var model: MetabaseLoginModel?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
             ZStack {
-                WebViewRepresentable(webView: model.webView)
-                if let message = model.errorMessage {
-                    errorOverlay(message)
+                if let model {
+                    WebViewRepresentable(webView: model.webView)
+                    if let message = model.errorMessage {
+                        errorOverlay(message)
+                    }
                 }
             }
         }
         .frame(minWidth: 480, idealWidth: 560, minHeight: 600)
-        .onAppear { model.start() }
-        .onDisappear { model.tearDown() }
-        .onChange(of: model.capturedToken) { _, token in
+        .onAppear {
+            guard model == nil else { return }
+            let model = MetabaseLoginModel(baseURL: baseURL)
+            self.model = model
+            model.start()
+        }
+        .onDisappear { model?.tearDown() }
+        .onChange(of: model?.capturedToken) { _, token in
             guard let token else { return }
             onToken(token)
             dismiss()
@@ -55,7 +77,7 @@ struct MetabaseLoginSheet: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                if model.isLoading {
+                if model?.isLoading == true {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -65,10 +87,10 @@ struct MetabaseLoginSheet: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             // Thin determinate bar under the toolbar while a page loads.
-            ProgressView(value: model.isLoading ? model.progress : 1)
+            ProgressView(value: model?.isLoading == true ? (model?.progress ?? 0) : 1)
                 .progressViewStyle(.linear)
                 .controlSize(.small)
-                .opacity(model.isLoading ? 1 : 0)
+                .opacity(model?.isLoading == true ? 1 : 0)
                 .frame(height: 2)
         }
     }
@@ -79,7 +101,7 @@ struct MetabaseLoginSheet: View {
                 "Couldn't Load Page",
                 systemImage: "wifi.exclamationmark",
                 description: Text(message))
-            Button("Retry") { model.retry() }
+            Button("Retry") { model?.retry() }
                 .keyboardShortcut(.defaultAction)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -111,7 +133,6 @@ private final class MetabaseLoginModel: NSObject {
         super.init()
 
         webView.navigationDelegate = self
-        configuration.websiteDataStore.httpCookieStore.add(self)
         progressObservation = webView.observe(\.estimatedProgress) { webView, _ in
             // WKWebView is main-actor bound, so KVO fires on the main thread;
             // the observation closure just isn't annotated that way.
@@ -122,10 +143,43 @@ private final class MetabaseLoginModel: NSObject {
         }
     }
 
+    /// Purges any pre-existing `metabase.SESSION` cookie for the instance
+    /// host before observing the store and loading the page: a stale (e.g.
+    /// server-revoked) cookie would otherwise be captured immediately and
+    /// loop the user through the sheet forever. IdP cookies are kept so SSO
+    /// can still redirect silently.
     func start() {
         guard !started else { return }
         started = true
-        webView.load(URLRequest(url: baseURL))
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        store.getAllCookies { [weak self] cookies in
+            guard let self else { return }
+            let host = self.baseURL.host()
+            let stale = cookies.filter { cookie in
+                cookie.name == "metabase.SESSION"
+                    && host.map { Self.domain(cookie.domain, matches: $0) } ?? true
+            }
+            self.delete(stale, from: store) {
+                store.add(self)
+                self.webView.load(URLRequest(url: self.baseURL))
+            }
+        }
+    }
+
+    /// Deletes cookies one at a time (the store API has no batch delete),
+    /// then runs `completion`.
+    private func delete(
+        _ cookies: [HTTPCookie], from store: WKHTTPCookieStore,
+        completion: @escaping @MainActor () -> Void
+    ) {
+        guard let cookie = cookies.first else {
+            completion()
+            return
+        }
+        store.delete(cookie) { [weak self] in
+            guard let self else { return }
+            self.delete(Array(cookies.dropFirst()), from: store, completion: completion)
+        }
     }
 
     func retry() {

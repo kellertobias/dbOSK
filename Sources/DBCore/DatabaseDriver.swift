@@ -47,6 +47,19 @@ public struct DriverDescriptor: Sendable {
     public let explainSupport: ExplainSupport
     /// Session-switchable target for unqualified SQL names, when supported.
     public let activeNamespaceKind: ActiveNamespaceKind?
+    /// Whether the connection is a TCP host:port the app may route through an
+    /// SSH tunnel. False for HTTP-API drivers whose "host" is a base URL.
+    public let supportsSSHTunnel: Bool
+    /// Whether generated SQL may qualify tables with the root `.database`
+    /// path component (`"db"."table"`). False when that component is only an
+    /// out-of-band routing label the backing engine cannot resolve (Metabase);
+    /// such tables are addressed by the remaining path and the driver routes
+    /// the query to the right database itself.
+    public let supportsDatabaseQualifiedSQL: Bool
+    /// Whether a fresh connection starts with every root namespace hidden so
+    /// the user explicitly picks what to show (drivers that expose an
+    /// unbounded, org-wide set of databases).
+    public let rootNamespacesDefaultHidden: Bool
 
     public init(
         id: String,
@@ -60,7 +73,10 @@ public struct DriverDescriptor: Sendable {
         supportsTableEditing: Bool = false,
         supportsDDL: Bool = false,
         explainSupport: ExplainSupport = .none,
-        activeNamespaceKind: ActiveNamespaceKind? = nil
+        activeNamespaceKind: ActiveNamespaceKind? = nil,
+        supportsSSHTunnel: Bool = true,
+        supportsDatabaseQualifiedSQL: Bool = true,
+        rootNamespacesDefaultHidden: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -74,6 +90,9 @@ public struct DriverDescriptor: Sendable {
         self.supportsDDL = supportsDDL
         self.explainSupport = explainSupport
         self.activeNamespaceKind = activeNamespaceKind
+        self.supportsSSHTunnel = supportsSSHTunnel
+        self.supportsDatabaseQualifiedSQL = supportsDatabaseQualifiedSQL
+        self.rootNamespacesDefaultHidden = rootNamespacesDefaultHidden
     }
 
     /// Quotes an identifier for this driver's SQL dialect.

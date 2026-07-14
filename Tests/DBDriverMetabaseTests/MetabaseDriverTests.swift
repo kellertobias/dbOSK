@@ -43,15 +43,13 @@ private actor MockHTTPClient: MetabaseHTTPClient {
     func lastBody(forPath path: String) -> [String: DBValue]? {
         guard let data = requests.last(where: { $0.url?.path == path })?.httpBody,
               let object = try? JSONSerialization.jsonObject(with: data),
-              case .document(let dict) = MetabaseResponseParser.dbValue(from: object)
+              case .document(let dict) = DBValue.fromJSONObject(object)
         else { return nil }
         return dict
     }
 }
 
 // MARK: - Fixtures
-
-private let userCurrentJSON = #"{"id": 1, "email": "user@example.com"}"#
 
 private let twoDatabasesEnvelopeJSON = """
     {"data": [
@@ -80,6 +78,15 @@ private let multiSchemaMetadataJSON = """
         {"id": 20, "name": "orders", "schema": "sales", "fields": []},
         {"id": 21, "name": "refunds", "schema": "sales", "fields": []},
         {"id": 22, "name": "events", "schema": "tracking", "fields": []}
+    ]}
+    """
+
+private let mixedSchemaMetadataJSON = """
+    {"tables": [
+        {"id": 20, "name": "orders", "schema": "sales", "fields": []},
+        {"id": 22, "name": "events", "schema": "tracking", "fields": []},
+        {"id": 23, "name": "loose", "schema": null, "fields": []},
+        {"id": 24, "name": "blank", "schema": "", "is_view": true, "fields": []}
     ]}
     """
 
@@ -115,7 +122,6 @@ private func standardRoutes(
     databases: String = twoDatabasesEnvelopeJSON
 ) -> [String: MockHTTPClient.Route] {
     [
-        "GET /api/user/current": .init(200, userCurrentJSON),
         "GET /api/database": .init(200, databases),
         "GET /api/database/3/metadata": .init(200, singleSchemaMetadataJSON),
         "GET /api/database/7/metadata": .init(200, multiSchemaMetadataJSON),
@@ -133,6 +139,9 @@ private func collectChunks(_ execution: QueryExecution) async throws -> [QueryRe
 @Suite struct MetabaseDriverTests {
     @Test func descriptorID() {
         #expect(MetabaseDriver.descriptor.id == "metabase")
+        #expect(!MetabaseDriver.descriptor.supportsSSHTunnel)
+        #expect(!MetabaseDriver.descriptor.supportsDatabaseQualifiedSQL)
+        #expect(MetabaseDriver.descriptor.rootNamespacesDefaultHidden)
     }
 
     @Test func databaseListEnvelopeShape() async throws {
@@ -232,6 +241,42 @@ private func collectChunks(_ execution: QueryExecution) async throws -> [QueryRe
         #expect(chunks[1].rows[0].values == [.int(3), .null, .null, .null, .null])
     }
 
+    @Test func multiSchemaDatabaseKeepsSchemalessTablesReachable() async throws {
+        var routes = standardRoutes()
+        routes["GET /api/database/7/metadata"] = .init(200, mixedSchemaMetadataJSON)
+        let (driver, _) = driver(routes: routes)
+        try await driver.connect()
+        let parent = Namespace(path: ["Warehouse"], kind: .database, isExpandable: true)
+        let children = try await driver.listNamespaces(parent: parent)
+
+        // Sorted schema nodes first, then nil/empty-schema tables directly.
+        #expect(children.map(\.name) == ["sales", "tracking", "blank", "loose"])
+        #expect(children[0].kind == .schema)
+        #expect(children[1].kind == .schema)
+        #expect(children[2].kind == .table(.view))
+        #expect(children[3].kind == .table(.table))
+        #expect(children[2].path == ["Warehouse", "blank"])
+        #expect(children[3].path == ["Warehouse", "loose"])
+    }
+
+    @Test func datasetNullErrorParsesAsSuccess() async throws {
+        var routes = standardRoutes()
+        routes["POST /api/dataset"] = .init(200, """
+            {"status": "completed", "error": null, "data": {
+                "cols": [{"name": "id", "base_type": "type/Integer"}],
+                "rows": [[1]]
+            }}
+            """)
+        let (driver, _) = driver(routes: routes)
+        try await driver.connect()
+        try await driver.setActiveNamespace("Analytics")
+
+        let execution = try await driver.execute(.sql("SELECT 1"), pageSize: 100)
+        let chunks = try await collectChunks(execution)
+        #expect(chunks.map(\.isFinal) == [true])
+        #expect(chunks[0].rows.map(\.values) == [[.int(1)]])
+    }
+
     @Test func executeRejectsNonSQL() async throws {
         let (driver, _) = driver(routes: standardRoutes())
         try await driver.connect()
@@ -260,7 +305,7 @@ private func collectChunks(_ execution: QueryExecution) async throws -> [QueryRe
 
     @Test func rejectedSessionBecomesAuthenticationExpired() async throws {
         let routes: [String: MockHTTPClient.Route] = [
-            "GET /api/user/current": .init(401, #"{"message": "Unauthenticated"}"#)
+            "GET /api/database": .init(401, #"{"message": "Unauthenticated"}"#)
         ]
         let (driver, _) = driver(routes: routes)
         do {
@@ -268,6 +313,7 @@ private func collectChunks(_ execution: QueryExecution) async throws -> [QueryRe
             Issue.record("expected authenticationExpired")
         } catch let error as DBError {
             #expect(error.kind == .authenticationExpired)
+            #expect(error.message.contains("disconnect and reconnect"))
         }
     }
 

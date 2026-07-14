@@ -28,23 +28,55 @@ public actor MetabaseDriver: DatabaseDriver {
         explainSupport: .none,
         // Selects which Metabase-exposed database native queries run against.
         // Unlike SQL drivers this is driver-local state, not a session statement.
-        activeNamespaceKind: .database
+        activeNamespaceKind: .database,
+        supportsSSHTunnel: false,
+        supportsDatabaseQualifiedSQL: false,
+        rootNamespacesDefaultHidden: true
     )
+
+    /// Qualified table lookup key; schema-less tables key on an empty schema.
+    private struct TableKey: Hashable {
+        let schema: String
+        let name: String
+    }
+
+    /// Indexed view over one `/api/database/:id/metadata` payload, precomputed
+    /// once per database so sidebar expands and column loads stay O(1)-ish.
+    private struct CachedMetadata {
+        /// Tables grouped by schema ("" for nil/empty), values pre-sorted by name.
+        let tablesBySchema: [String: [MetabaseTable]]
+        /// (schema ?? "", name) → table, for qualified `listColumns` paths.
+        let tableByKey: [TableKey: MetabaseTable]
+        /// Name-only lookup for unqualified paths; the schema-order first match wins.
+        let tableByName: [String: MetabaseTable]
+
+        init(tables: [MetabaseTable]) {
+            let grouped = Dictionary(grouping: tables) { $0.schema ?? "" }
+                .mapValues { $0.sorted { $0.name < $1.name } }
+            var byKey: [TableKey: MetabaseTable] = [:]
+            var byName: [String: MetabaseTable] = [:]
+            for schema in grouped.keys.sorted() {
+                for table in grouped[schema]! {
+                    byKey[TableKey(schema: schema, name: table.name)] = table
+                    if byName[table.name] == nil { byName[table.name] = table }
+                }
+            }
+            tablesBySchema = grouped
+            tableByKey = byKey
+            tableByName = byName
+        }
+    }
 
     private let config: ResolvedConnectionConfig
     private let client: any MetabaseHTTPClient
 
-    private var databases: [MetabaseDatabaseInfo] = []
-    /// Sidebar display name → Metabase database id. Names are usually unique;
-    /// duplicates get an " (id)" suffix so every node stays addressable.
-    private var databaseIDsByName: [String: Int] = [:]
-    private var orderedDatabaseNames: [String] = []
-    private var metadataByDatabaseID: [Int: MetabaseDatabaseMetadata] = [:]
+    /// Sidebar display name and Metabase database id, sorted by name. Names
+    /// are usually unique; duplicates get an " (id)" suffix so every node
+    /// stays addressable.
+    private var databaseEntries: [(displayName: String, id: Int)] = []
+    private var metadataByDatabaseID: [Int: CachedMetadata] = [:]
     /// Toolbar-selected target for native queries; driver-local, no SQL sent.
     private var activeDatabaseName: String?
-    /// In-flight `/api/dataset` request, kept so `QueryExecution.cancel` can
-    /// abort the transfer.
-    private var activeRequest: Task<(Data, HTTPURLResponse), Error>?
 
     public init(config: ResolvedConnectionConfig) throws {
         self.config = config
@@ -61,17 +93,13 @@ public actor MetabaseDriver: DatabaseDriver {
 
     public func connect() async throws {
         activeDatabaseName = nil
-        let request = try makeRequest(path: "/api/user/current")
-        _ = try await send(request, failureKind: .connectionFailed)
+        // `GET /api/database` doubles as the session check: a stale token
+        // surfaces as 401 → .authenticationExpired through validate().
         try await loadDatabases()
     }
 
     public func disconnect() async {
-        activeRequest?.cancel()
-        activeRequest = nil
-        databases = []
-        databaseIDsByName = [:]
-        orderedDatabaseNames = []
+        databaseEntries = []
         metadataByDatabaseID = [:]
         activeDatabaseName = nil
     }
@@ -80,23 +108,33 @@ public actor MetabaseDriver: DatabaseDriver {
 
     public func listNamespaces(parent: Namespace?) async throws -> [Namespace] {
         guard let parent else {
-            if databases.isEmpty { try await loadDatabases() }
-            return orderedDatabaseNames.map {
-                Namespace(path: [$0], kind: .database, isExpandable: true)
+            if databaseEntries.isEmpty { try await loadDatabases() }
+            return databaseEntries.map {
+                Namespace(path: [$0.displayName], kind: .database, isExpandable: true)
             }
         }
 
         switch parent.kind {
         case .database:
             let databaseName = parent.path[0]
-            let tables = try await tables(inDatabaseNamed: databaseName)
-            let schemas = Set(tables.compactMap(\.schema).filter { !$0.isEmpty })
+            let metadata = try await metadata(forDatabaseNamed: databaseName)
+            let schemas = metadata.tablesBySchema.keys.filter { !$0.isEmpty }.sorted()
             if schemas.count > 1 {
-                return schemas.sorted().map {
+                // Schema nodes first, then any schema-less tables as direct
+                // children so nothing becomes unreachable.
+                let schemaNodes = schemas.map {
                     Namespace(path: [databaseName, $0], kind: .schema, isExpandable: true)
                 }
+                let looseTables = (metadata.tablesBySchema[""] ?? []).map {
+                    Namespace(
+                        path: [databaseName, $0.name],
+                        kind: .table($0.tableKind),
+                        isExpandable: false)
+                }
+                return schemaNodes + looseTables
             }
-            return tables
+            return metadata.tablesBySchema.values
+                .joined()
                 .sorted { $0.name < $1.name }
                 .map {
                     Namespace(
@@ -107,15 +145,13 @@ public actor MetabaseDriver: DatabaseDriver {
         case .schema:
             let databaseName = parent.path[0]
             let schema = parent.path[1]
-            return try await tables(inDatabaseNamed: databaseName)
-                .filter { $0.schema == schema }
-                .sorted { $0.name < $1.name }
-                .map {
-                    Namespace(
-                        path: [databaseName, schema, $0.name],
-                        kind: .table($0.tableKind),
-                        isExpandable: false)
-                }
+            let metadata = try await metadata(forDatabaseNamed: databaseName)
+            return (metadata.tablesBySchema[schema] ?? []).map {
+                Namespace(
+                    path: [databaseName, schema, $0.name],
+                    kind: .table($0.tableKind),
+                    isExpandable: false)
+            }
         case .table:
             return []
         }
@@ -126,8 +162,12 @@ public actor MetabaseDriver: DatabaseDriver {
         let databaseName = table.path[0]
         let schema = table.path.count >= 3 ? table.path[1] : nil
         let tableName = table.path.last ?? ""
-        let match = try await tables(inDatabaseNamed: databaseName).first {
-            $0.name == tableName && (schema == nil || $0.schema == schema)
+        let metadata = try await metadata(forDatabaseNamed: databaseName)
+        let match: MetabaseTable? = if let schema {
+            metadata.tableByKey[TableKey(schema: schema, name: tableName)]
+        } else {
+            metadata.tableByKey[TableKey(schema: "", name: tableName)]
+                ?? metadata.tableByName[tableName]
         }
         guard let match else {
             throw DBError(kind: .queryFailed, message: "Unknown table \"\(tableName)\"")
@@ -158,20 +198,12 @@ public actor MetabaseDriver: DatabaseDriver {
             "native": ["query": sql],
         ])
 
-        // Kept as an actor-held task so cancel aborts the transfer; Metabase
-        // has no server-side cancel, the 2000-row `/api/dataset` cap bounds
-        // the response instead.
-        let requestTask = Task { [client] in try await client.send(request) }
-        activeRequest = requestTask
-        defer { activeRequest = nil }
-
+        // URLSession honors cooperative cancellation, so cancelling the calling
+        // task aborts the transfer; Metabase has no server-side cancel, the
+        // 2000-row `/api/dataset` cap bounds the response instead.
         let data: Data
         do {
-            let (body, response) = try await withTaskCancellationHandler {
-                try await requestTask.value
-            } onCancel: {
-                requestTask.cancel()
-            }
+            let (body, response) = try await client.send(request)
             try validate(response, data: body, failureKind: .queryFailed)
             data = body
         } catch let error as DBError {
@@ -191,49 +223,40 @@ public actor MetabaseDriver: DatabaseDriver {
         return Self.execution(columns: columns, rows: rows, pageSize: pageSize)
     }
 
-    /// Delivers already-materialized rows in `pageSize`-bounded chunks.
+    /// Delivers already-materialized rows in `pageSize`-bounded chunks,
+    /// yielded synchronously into the buffering stream.
     private static func execution(
         columns: [ColumnMeta], rows: [ResultRow], pageSize: Int
     ) -> QueryExecution {
         let (stream, continuation) = AsyncThrowingStream<QueryResultChunk, Error>.makeStream()
         let size = max(1, pageSize)
-        let producer = Task {
-            do {
-                if rows.isEmpty {
-                    continuation.yield(QueryResultChunk(rows: [], isFinal: true))
-                } else {
-                    var index = 0
-                    while index < rows.count {
-                        try Task.checkCancellation()
-                        let end = min(index + size, rows.count)
-                        continuation.yield(QueryResultChunk(
-                            rows: Array(rows[index..<end]),
-                            isFinal: end == rows.count))
-                        index = end
-                    }
-                }
-                continuation.finish()
-            } catch {
-                continuation.finish(throwing: DBError(kind: .cancelled, message: "Query cancelled"))
+        if rows.isEmpty {
+            continuation.yield(QueryResultChunk(rows: [], isFinal: true))
+        } else {
+            var index = 0
+            while index < rows.count {
+                let end = min(index + size, rows.count)
+                continuation.yield(QueryResultChunk(
+                    rows: Array(rows[index..<end]),
+                    isFinal: end == rows.count))
+                index = end
             }
         }
-        continuation.onTermination = { _ in producer.cancel() }
-        return QueryExecution(
-            columns: columns,
-            chunks: stream,
-            cancel: { producer.cancel() })
+        continuation.finish()
+        return QueryExecution(columns: columns, chunks: stream, cancel: {})
     }
 
     private func targetDatabaseID() throws -> Int {
         if let activeDatabaseName {
-            guard let id = databaseIDsByName[activeDatabaseName] else {
+            guard let entry = databaseEntries.first(where: { $0.displayName == activeDatabaseName })
+            else {
                 throw DBError(
                     kind: .queryFailed,
                     message: "Unknown database \"\(activeDatabaseName)\"")
             }
-            return id
+            return entry.id
         }
-        if databases.count == 1 { return databases[0].id }
+        if databaseEntries.count == 1 { return databaseEntries[0].id }
         throw DBError(kind: .queryFailed, message: "Select a database in the toolbar first.")
     }
 
@@ -242,29 +265,27 @@ public actor MetabaseDriver: DatabaseDriver {
     private func loadDatabases() async throws {
         let request = try makeRequest(path: "/api/database")
         let data = try await send(request, failureKind: .connectionFailed)
-        databases = try MetabaseResponseParser.databaseList(from: data)
+        let databases = try MetabaseResponseParser.databaseList(from: data)
 
         var counts: [String: Int] = [:]
         for database in databases { counts[database.name, default: 0] += 1 }
-        databaseIDsByName = [:]
-        orderedDatabaseNames = databases
-            .map { database -> String in
+        databaseEntries = databases
+            .map { database in
                 let display = counts[database.name]! > 1
                     ? "\(database.name) (\(database.id))"
                     : database.name
-                databaseIDsByName[display] = database.id
-                return display
+                return (displayName: display, id: database.id)
             }
-            .sorted()
+            .sorted { $0.displayName < $1.displayName }
     }
 
-    private func tables(inDatabaseNamed name: String) async throws -> [MetabaseTable] {
-        if databases.isEmpty { try await loadDatabases() }
-        guard let id = databaseIDsByName[name] else {
+    private func metadata(forDatabaseNamed name: String) async throws -> CachedMetadata {
+        if databaseEntries.isEmpty { try await loadDatabases() }
+        guard let entry = databaseEntries.first(where: { $0.displayName == name }) else {
             throw DBError(kind: .queryFailed, message: "Unknown database \"\(name)\"")
         }
-        if let cached = metadataByDatabaseID[id] { return cached.tables ?? [] }
-        let request = try makeRequest(path: "/api/database/\(id)/metadata")
+        if let cached = metadataByDatabaseID[entry.id] { return cached }
+        let request = try makeRequest(path: "/api/database/\(entry.id)/metadata")
         let data = try await send(request, failureKind: .connectionFailed)
         let metadata: MetabaseDatabaseMetadata
         do {
@@ -275,8 +296,9 @@ public actor MetabaseDriver: DatabaseDriver {
                 message: "Could not parse metadata for \"\(name)\"",
                 underlying: String(describing: error))
         }
-        metadataByDatabaseID[id] = metadata
-        return metadata.tables ?? []
+        let cached = CachedMetadata(tables: metadata.tables ?? [])
+        metadataByDatabaseID[entry.id] = cached
+        return cached
     }
 
     // MARK: - HTTP plumbing
@@ -334,7 +356,7 @@ public actor MetabaseDriver: DatabaseDriver {
         case 401:
             throw DBError(
                 kind: .authenticationExpired,
-                message: "Metabase session expired — please sign in again")
+                message: "Metabase session expired — disconnect and reconnect to sign in again.")
         default:
             let detail = MetabaseResponseParser.errorMessage(from: data)
             throw DBError(

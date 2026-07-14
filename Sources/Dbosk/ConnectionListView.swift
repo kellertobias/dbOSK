@@ -25,6 +25,7 @@ struct ConnectionListView: View {
     }
 
     var body: some View {
+        @Bindable var appModel = appModel
         VStack(spacing: 0) {
             if appModel.profiles.isEmpty {
                 WelcomeView(showingNewProfile: $showingNewProfile)
@@ -65,14 +66,21 @@ struct ConnectionListView: View {
         }
         // A connect hit an expired/missing Metabase session: run the SSO
         // login, store the fresh token, and retry the connect.
-        .sheet(item: Binding(
-            get: { appModel.metabaseLoginRequest },
-            set: { appModel.metabaseLoginRequest = $0 }
-        )) { profile in
-            if let url = profile.host.flatMap(URL.init(string:)) {
+        .sheet(item: $appModel.metabaseLoginRequest) { profile in
+            if let url = MetabaseURL.normalized(profile.host) {
                 MetabaseLoginSheet(baseURL: url) { token in
-                    try? appModel.keychain.setPassword(token, for: profile.id)
                     appModel.metabaseLoginRequest = nil
+                    do {
+                        try appModel.keychain.setPassword(token, for: profile.id)
+                    } catch {
+                        // Reconnecting would reuse the old (rejected) token
+                        // and loop right back into this sheet.
+                        appModel.connectionError = """
+                            Signed in, but the new session token could not be \
+                            saved to the Keychain: \(error.localizedDescription)
+                            """
+                        return
+                    }
                     Task {
                         if await appModel.connect(to: profile) {
                             openWindow(value: profile.id)
@@ -202,12 +210,17 @@ struct ConnectionEditView: View {
     private var isFileBased: Bool { driverID == SQLiteDriver.descriptor.id }
     private var isMetabase: Bool { driverID == MetabaseDriver.descriptor.id }
 
-    /// The Metabase base URL, when the host field parses as one.
+    /// Whether the selected driver's connection can route through an SSH
+    /// tunnel (false for HTTP-API drivers like Metabase).
+    private var driverSupportsSSHTunnel: Bool {
+        AppModel.availableDrivers
+            .first { $0.id == driverID }?.supportsSSHTunnel ?? true
+    }
+
+    /// The Metabase base URL, when the host field normalizes to one (a bare
+    /// host without scheme works — https:// is assumed).
     private var metabaseBaseURL: URL? {
-        guard !host.isEmpty, let url = URL(string: host),
-              url.scheme != nil, url.host() != nil
-        else { return nil }
-        return url
+        MetabaseURL.normalized(host)
     }
 
     enum CredentialMode: String, CaseIterable {
@@ -288,12 +301,10 @@ struct ConnectionEditView: View {
                                 showingMetabaseLogin = true
                             }
                             .disabled(metabaseBaseURL == nil)
-                            if !metabaseToken.isEmpty {
-                                Text("Signed in — session token will be stored in the Keychain.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else if metabaseHasStoredToken {
-                                Text("Session token stored.")
+                            // Freshly captured or already in the Keychain —
+                            // either way a session token exists.
+                            if !metabaseToken.isEmpty || metabaseHasStoredToken {
+                                Text("Signed in — session token is stored in the Keychain.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -587,7 +598,8 @@ struct ConnectionEditView: View {
             filePath: isFileBased && !filePath.isEmpty ? filePath : nil,
             tls: tls,
             credentialSource: source,
-            sshTunnel: !isFileBased && !isMetabase && tunnelEnabled && !tunnelHost.isEmpty
+            sshTunnel: !isFileBased && driverSupportsSSHTunnel
+                && tunnelEnabled && !tunnelHost.isEmpty
                 ? SSHTunnelConfig(
                     host: tunnelHost,
                     port: Int(tunnelPort) ?? 22,

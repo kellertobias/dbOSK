@@ -96,6 +96,30 @@ import Testing
         #expect(loaded.history[0].succeeded)
     }
 
+    @Test func initialRootVisibilityMarkerRoundtrips() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dbosk-rootvis-\(UUID().uuidString)")
+        let store = MetadataStore(directory: dir)
+        let profileID = UUID()
+
+        // The marker survives a save/load even when every table entry was
+        // pruned (the user unhid everything) — that's exactly the state the
+        // marker exists for.
+        var metadata = ConnectionMetadata()
+        metadata.initialRootVisibilityApplied = true
+        #expect(metadata.tables.isEmpty)
+        try store.save(metadata, for: profileID)
+        let loaded = store.load(for: profileID)
+        #expect(loaded.initialRootVisibilityApplied)
+        #expect(loaded == metadata)
+
+        // Files written before the marker existed load as "not applied".
+        let legacy = #"{"savedQueries": [], "tables": {}}"#
+        let decoded = try JSONDecoder().decode(
+            ConnectionMetadata.self, from: Data(legacy.utf8))
+        #expect(!decoded.initialRootVisibilityApplied)
+    }
+
     @Test func pathKeysDoNotCollide() {
         // ["a.b", "c"] and ["a", "b.c"] must map to different keys.
         #expect(ConnectionMetadata.key(for: ["a.b", "c"])

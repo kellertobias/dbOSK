@@ -27,8 +27,13 @@ struct MetabaseField: Decodable, Sendable {
     var typeName: String {
         if let databaseType, !databaseType.isEmpty { return databaseType }
         guard let baseType else { return "" }
-        return baseType.hasPrefix("type/") ? String(baseType.dropFirst(5)) : baseType
+        return strippedBaseType(baseType)
     }
+}
+
+/// Strips the "type/" prefix Metabase prepends to semantic `base_type` values.
+func strippedBaseType(_ baseType: String) -> String {
+    baseType.hasPrefix("type/") ? String(baseType.dropFirst(5)) : baseType
 }
 
 /// Table metadata inside `GET /api/database/:id/metadata`.
@@ -93,13 +98,16 @@ enum MetabaseResponseParser {
     }
 
     /// Columns and rows from a successful `POST /api/dataset` body; a
-    /// top-level `"status": "failed"` (or `error` field) becomes `.queryFailed`.
+    /// top-level `"status": "failed"` (or non-null `error` field) becomes
+    /// `.queryFailed`. Metabase may send an explicit `"error": null` on
+    /// success, which counts as no error.
     static func datasetResult(from data: Data) throws -> (columns: [ColumnMeta], rows: [ResultRow]) {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw DBError(kind: .queryFailed, message: "Unexpected response from Metabase")
         }
-        if (root["status"] as? String) == "failed" || root["error"] != nil {
-            throw DBError(kind: .queryFailed, message: (root["error"] as? String) ?? "Query failed")
+        let error = root["error"].flatMap { $0 is NSNull ? nil : $0 }
+        if (root["status"] as? String) == "failed" || error != nil {
+            throw DBError(kind: .queryFailed, message: (error as? String) ?? "Query failed")
         }
         guard let payload = root["data"] as? [String: Any] else {
             throw DBError(kind: .queryFailed, message: "Metabase response contained no result data")
@@ -111,44 +119,14 @@ enum MetabaseResponseParser {
                 ?? (col["display_name"] as? String)
                 ?? "col\(index)"
             let databaseType = col["database_type"] as? String
-            let baseType = (col["base_type"] as? String).map {
-                $0.hasPrefix("type/") ? String($0.dropFirst(5)) : $0
-            }
+            let baseType = (col["base_type"] as? String).map(strippedBaseType)
             return ColumnMeta(name: name, dbTypeName: databaseType ?? baseType ?? "")
         }
 
         let rawRows = payload["rows"] as? [[Any]] ?? []
         let rows = rawRows.enumerated().map { index, raw in
-            ResultRow(id: index, values: raw.map(dbValue(from:)))
+            ResultRow(id: index, values: raw.map(DBValue.fromJSONObject))
         }
         return (columns, rows)
-    }
-
-    /// Maps one JSON cell to `DBValue`. `NSNumber` booleans are told apart
-    /// from numerics via their CoreFoundation type; integral numbers become
-    /// `.int`, everything else `.double`.
-    static func dbValue(from json: Any) -> DBValue {
-        switch json {
-        case is NSNull:
-            return .null
-        case let number as NSNumber:
-            if CFGetTypeID(number) == CFBooleanGetTypeID() {
-                return .bool(number.boolValue)
-            }
-            switch String(cString: number.objCType) {
-            case "c", "s", "i", "l", "q", "C", "S", "I", "L", "Q":
-                return .int(number.int64Value)
-            default:
-                return .double(number.doubleValue)
-            }
-        case let string as String:
-            return .string(string)
-        case let dict as [String: Any]:
-            return .document(dict.mapValues(dbValue(from:)))
-        case let array as [Any]:
-            return .array(array.map(dbValue(from:)))
-        default:
-            return .string(String(describing: json))
-        }
     }
 }
