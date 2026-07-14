@@ -2,6 +2,7 @@ import Connections
 import DBCore
 import Export
 import DBDriverDynamoDB
+import DBDriverMetabase
 import DBDriverMongo
 import DBDriverMySQL
 import DBDriverPostgres
@@ -20,6 +21,7 @@ final class AppModel {
         SQLiteDriver.descriptor,
         RedisDriver.descriptor,
         DynamoDBDriver.descriptor,
+        MetabaseDriver.descriptor,
     ]
 
     var profiles: [ConnectionProfile] = []
@@ -29,6 +31,9 @@ final class AppModel {
     var sessions: [UUID: ConnectionSession] = [:]
     var connectionError: String?
     var isConnecting = false
+    /// Set when a connect failed because the Metabase session token was
+    /// rejected; the connection list presents the SSO login sheet for it.
+    var metabaseLoginRequest: ConnectionProfile?
 
     private let profileStore = ProfileStore()
     private let labelStore = LabelStore()
@@ -142,10 +147,13 @@ final class AppModel {
 
             // Route through an SSH tunnel first when configured: forward a
             // local port to the (resolved) database host and rewrite the
-            // config to point at it.
-            if let tunnelConfig = profile.sshTunnel, config.filePath == nil {
-                let descriptor = AppModel.availableDrivers
-                    .first { $0.id == profile.driverID }
+            // config to point at it. HTTP-API drivers are excluded — their
+            // "host" is a base URL, not a TCP endpoint the tunnel could
+            // forward to.
+            let descriptor = AppModel.availableDrivers
+                .first { $0.id == profile.driverID }
+            if let tunnelConfig = profile.sshTunnel, config.filePath == nil,
+               descriptor?.supportsSSHTunnel != false {
                 let targetPort = config.port ?? descriptor?.defaultPort ?? 0
                 tunnel = try await SSHTunnel.start(
                     config: tunnelConfig,
@@ -164,6 +172,14 @@ final class AppModel {
             return true
         } catch {
             tunnel?.stop()
+            // An expired/missing Metabase session gets a fresh SSO login
+            // prompt instead of a raw error message.
+            if let dbError = error as? DBError, dbError.kind == .authenticationExpired,
+               profile.driverID == MetabaseDriver.descriptor.id,
+               MetabaseURL.normalized(profile.host) != nil {
+                metabaseLoginRequest = profile
+                return false
+            }
             var message = String(describing: error)
             if let credentialDiagnostics {
                 message += "\n\(credentialDiagnostics)"
@@ -195,6 +211,8 @@ final class AppModel {
             return try RedisDriver(config: config)
         case DynamoDBDriver.descriptor.id:
             return try DynamoDBDriver(config: config)
+        case MetabaseDriver.descriptor.id:
+            return try MetabaseDriver(config: config)
         default:
             throw DBError(
                 kind: .unsupported,
@@ -434,6 +452,14 @@ final class ConnectionSession: Identifiable {
         }
         nodes += groups.sorted().map { .group($0, parent: namespace) }
         nodes += ungrouped.map { .namespace($0, parent: namespace) }
+        // An expanded parent that loaded no visible children gets a quiet
+        // placeholder so the user sees "there is nothing here" rather than a
+        // silently empty disclosure.
+        if nodes.isEmpty {
+            let message = descriptor.rootNamespacesDefaultHidden
+                ? "No tables you have access to" : "No tables"
+            nodes = [.emptyMessage(message, parent: namespace)]
+        }
         sidebarNodeCache[namespace.id] = nodes
         return nodes
     }
@@ -536,6 +562,10 @@ final class ConnectionSession: Identifiable {
                     editing: editing,
                     checkState: editing
                         ? groupCheckState(name: name, parent: parent) : nil)
+            case .emptyMessage:
+                row = SidebarRow(
+                    kind: kind, depth: depth, isHidden: false, note: nil,
+                    editing: editing, checkState: nil)
             }
             rows.append(row)
             guard row.isExpandable, expanded.contains(row.id) else { return }
@@ -545,6 +575,8 @@ final class ConnectionSession: Identifiable {
                 childKinds = sidebarChildren(of: namespace) ?? []
             case .group(let name, let parent):
                 childKinds = sidebarGroupChildren(group: name, in: parent)
+            case .emptyMessage:
+                childKinds = []
             }
             for child in childKinds { append(child, depth: depth + 1) }
         }
@@ -578,6 +610,15 @@ final class ConnectionSession: Identifiable {
         browser.displayMode = mode
         browser.resultTab.onExecuted = { [weak self] text, succeeded in
             self?.recordHistory(text: text, succeeded: succeeded)
+        }
+        // When generated SQL cannot name the table's database, every data
+        // query (initial load, pagination, refresh) must first point the
+        // connection at it — the driver routes by active namespace.
+        if descriptor.activeNamespaceKind != nil,
+           !descriptor.supportsDatabaseQualifiedSQL {
+            browser.prepareForQuery = { [weak self] table in
+                await self?.switchToRootNamespaceIfNeeded(for: table)
+            }
         }
         let tab = WorkTab(title: namespace.name, content: .table(browser))
         tabs.append(tab)
@@ -623,6 +664,20 @@ final class ConnectionSession: Identifiable {
         }
     }
 
+    /// Switches the session's active namespace to `namespace`'s root database
+    /// when the driver routes SQL by active namespace instead of a database-
+    /// qualified name (`supportsDatabaseQualifiedSQL == false`). No-op for
+    /// every other driver, or when the root is already active — so callers
+    /// may invoke it unconditionally before running table-scoped SQL.
+    func switchToRootNamespaceIfNeeded(for namespace: Namespace) async {
+        guard descriptor.activeNamespaceKind != nil,
+              !descriptor.supportsDatabaseQualifiedSQL,
+              let root = namespace.path.first,
+              activeNamespace != root
+        else { return }
+        await setActiveNamespace(root)
+    }
+
     /// Opens a new raw-query tab, optionally prefilled and executed.
     func openQueryTab(
         initialSQL: String = "",
@@ -654,9 +709,33 @@ final class ConnectionSession: Identifiable {
     func loadRoot() async {
         do {
             rootNamespaces = try await driver.listNamespaces(parent: nil)
+            applyDefaultRootVisibility()
         } catch {
             sidebarError = String(describing: error)
         }
+    }
+
+    /// Drivers that expose an org-wide set of databases (Metabase) list
+    /// dozens of roots, so a fresh connection starts with all of them hidden
+    /// and the sidebar offers "Choose Databases…" instead. Applies exactly
+    /// once per connection — a persisted marker remembers it, so an explicit
+    /// user choice (including "show everything", which prunes the stored
+    /// entries) is never overridden on reconnect.
+    private func applyDefaultRootVisibility() {
+        guard descriptor.rootNamespacesDefaultHidden,
+              !metadata.initialRootVisibilityApplied else { return }
+        let roots = rootNamespaces.filter { $0.kind == .database }
+        guard !roots.isEmpty else { return }
+        metadata.initialRootVisibilityApplied = true
+        // Pre-marker metadata that already has a root entry means the user
+        // made a choice on an earlier version: only record the marker.
+        if roots.allSatisfy({ metadata.tables[$0.pathKey] == nil }) {
+            for root in roots {
+                metadata.update(root.path) { $0.hidden = true }
+            }
+            invalidateSidebarNodes()
+        }
+        persistMetadata()
     }
 
     func loadChildren(of namespace: Namespace) async {
@@ -755,6 +834,10 @@ final class QueryTab {
     /// session hooks this to record history.
     var onExecuted: ((String, Bool) -> Void)?
 
+    /// When set, `run()` executes this structured query instead of `queryText`.
+    /// Table mode uses it for drivers that generate their own browse SQL.
+    var browseRequest: DriverQuery?
+
     /// True when linked to a saved query whose text differs from the editor.
     var hasUnsavedChanges: Bool {
         guard let savedQuery else { return false }
@@ -764,7 +847,16 @@ final class QueryTab {
     func run() {
         guard runState != .running, runState != .streaming else { return }
         let sql = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sql.isEmpty else { return }
+        // A browse request (set by Table mode for drivers that build their own
+        // browse SQL) runs instead of the editor text; `queryText` stays as the
+        // human-readable preview shown in history.
+        let query: DriverQuery
+        if let browseRequest {
+            query = browseRequest
+        } else {
+            guard !sql.isEmpty else { return }
+            query = .sql(sql)
+        }
 
         runState = .running
         dismissExplain()
@@ -775,7 +867,7 @@ final class QueryTab {
 
         runTask = Task { [driver, pageSize] in
             do {
-                let execution = try await driver.execute(.sql(sql), pageSize: pageSize)
+                let execution = try await driver.execute(query, pageSize: pageSize)
                 self.cancelHandler = execution.cancel
                 self.columns = execution.columns
                 self.runState = .streaming
@@ -955,6 +1047,11 @@ final class TableBrowser {
     /// Executes the built query; reuses the streaming runner.
     let resultTab: QueryTab
 
+    /// Awaited before each generated data query runs, so the session can
+    /// point the connection at the table's database first (drivers whose
+    /// generated SQL cannot name it — `supportsDatabaseQualifiedSQL` false).
+    var prepareForQuery: (@MainActor (Namespace) async -> Void)?
+
     private let driver: any DatabaseDriver
     let descriptor: DriverDescriptor
 
@@ -1018,9 +1115,31 @@ final class TableBrowser {
     }
 
     func load() {
-        guard let query = builtQuery else { return }
+        guard let table, let query = builtQuery else { return }
         resultTab.queryText = query
-        resultTab.run()
+        // When the driver builds its own browse SQL (heterogeneous engines
+        // behind one connection), hand it the structured request; the query
+        // string above is only the preview shown in history.
+        if descriptor.buildsTableBrowseInDriver {
+            let columns = selectedColumns.isEmpty
+                ? []
+                : availableColumns.map(\.name).filter { selectedColumns.contains($0) }
+            let filter = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+            resultTab.browseRequest = .tableBrowse(TableBrowseRequest(
+                path: table.path, columns: columns,
+                filter: filter.isEmpty ? nil : filter,
+                limit: limit, offset: offset))
+        } else {
+            resultTab.browseRequest = nil
+        }
+        if let prepareForQuery {
+            Task {
+                await prepareForQuery(table)
+                resultTab.run()
+            }
+        } else {
+            resultTab.run()
+        }
     }
 
     /// Switches display mode, fetching the structure on first use.

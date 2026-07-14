@@ -66,6 +66,10 @@ let package = Package(
             ]
         ),
         .target(
+            name: "DBDriverMetabase",
+            dependencies: ["DBCore"]
+        ),
+        .target(
             name: "Connections",
             dependencies: [
                 "DBCore",
@@ -78,7 +82,7 @@ let package = Package(
             name: "Dbosk",
             dependencies: [
                 "DBCore", "DBDriverPostgres", "DBDriverMySQL", "DBDriverMongo",
-                "DBDriverSQLite", "DBDriverRedis", "DBDriverDynamoDB",
+                "DBDriverSQLite", "DBDriverRedis", "DBDriverDynamoDB", "DBDriverMetabase",
                 "Connections", "Export", "QueryEditor",
             ]
         ),
@@ -92,6 +96,7 @@ let package = Package(
         .testTarget(name: "DBDriverSQLiteTests", dependencies: ["DBDriverSQLite"]),
         .testTarget(name: "DBDriverRedisTests", dependencies: ["DBDriverRedis"]),
         .testTarget(name: "DBDriverDynamoDBTests", dependencies: ["DBDriverDynamoDB"]),
+        .testTarget(name: "DBDriverMetabaseTests", dependencies: ["DBDriverMetabase"]),
         .testTarget(name: "ConnectionsTests", dependencies: ["Connections"]),
         .testTarget(name: "ExportTests", dependencies: ["Export"]),
         .testTarget(name: "QueryEditorTests", dependencies: ["QueryEditor"]),

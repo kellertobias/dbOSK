@@ -60,20 +60,28 @@ public struct ConnectionMetadata: Codable, Sendable, Equatable {
     public var history: [QueryHistoryEntry]
     /// Keyed by `Self.key(for:)` of the table's namespace path.
     public var tables: [String: TableMeta]
+    /// Whether the one-time "hide all roots by default" pass already ran on
+    /// this connection (drivers that default-hide their roots). Persisted
+    /// explicitly because unhiding prunes the `tables` entries the pass
+    /// would otherwise use to detect a prior run.
+    public var initialRootVisibilityApplied: Bool
 
     public init(
         savedQueries: [SavedQuery] = [],
         history: [QueryHistoryEntry] = [],
-        tables: [String: TableMeta] = [:]
+        tables: [String: TableMeta] = [:],
+        initialRootVisibilityApplied: Bool = false
     ) {
         self.savedQueries = savedQueries
         self.history = history
         self.tables = tables
+        self.initialRootVisibilityApplied = initialRootVisibilityApplied
     }
 
-    // Custom decoding: `history` is absent in pre-history metadata files.
+    // Custom decoding: `history` is absent in pre-history metadata files,
+    // `initialRootVisibilityApplied` in pre-marker ones.
     private enum CodingKeys: String, CodingKey {
-        case savedQueries, history, tables
+        case savedQueries, history, tables, initialRootVisibilityApplied
     }
 
     public init(from decoder: any Decoder) throws {
@@ -81,6 +89,8 @@ public struct ConnectionMetadata: Codable, Sendable, Equatable {
         savedQueries = try c.decodeIfPresent([SavedQuery].self, forKey: .savedQueries) ?? []
         history = try c.decodeIfPresent([QueryHistoryEntry].self, forKey: .history) ?? []
         tables = try c.decodeIfPresent([String: TableMeta].self, forKey: .tables) ?? [:]
+        initialRootVisibilityApplied = try c.decodeIfPresent(
+            Bool.self, forKey: .initialRootVisibilityApplied) ?? false
     }
 
     /// Prepends an executed query. Re-running the newest entry updates it

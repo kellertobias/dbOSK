@@ -6,10 +6,13 @@
 #   Scripts/make-app.sh --dmg      # also produce dist/Dbosk.dmg
 #
 # Environment:
-#   DBOSK_SIGN_IDENTITY   Developer ID Application identity for real signing
-#                         (default: ad-hoc "-"). With a real identity the
-#                         binary is signed with hardened runtime + timestamp,
-#                         ready for `xcrun notarytool submit`.
+#   DBOSK_SIGN_IDENTITY      Developer ID Application identity for real signing
+#                            (default: ad-hoc "-"). With a real identity the
+#                            binary is signed with hardened runtime + timestamp,
+#                            ready for `xcrun notarytool submit`.
+#   DBOSK_SWIFT_BUILD_FLAGS  Extra flags for `swift build` (e.g. the Homebrew
+#                            formula passes --disable-sandbox).
+#   DBOSK_VERSION            Override the bundle version (default: 0.1.0).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -18,13 +21,14 @@ APP_NAME="Dbosk"
 # for the bundle (./build archive install copies its output). UserDefaults
 # are scoped to this id, so changing it orphans existing preferences.
 BUNDLE_ID="dev.tobiaskeller.dbosk"
-VERSION="0.1.0"
+VERSION="${DBOSK_VERSION:-0.1.0}"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 IDENTITY="${DBOSK_SIGN_IDENTITY:--}"
 
 echo "==> Building release binary"
-swift build -c release
+# shellcheck disable=SC2086  # flags are intentionally word-split
+swift build -c release ${DBOSK_SWIFT_BUILD_FLAGS:-}
 
 echo "==> Assembling $APP"
 rm -rf "$APP"

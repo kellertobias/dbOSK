@@ -47,6 +47,24 @@ public struct DriverDescriptor: Sendable {
     public let explainSupport: ExplainSupport
     /// Session-switchable target for unqualified SQL names, when supported.
     public let activeNamespaceKind: ActiveNamespaceKind?
+    /// Whether the connection is a TCP host:port the app may route through an
+    /// SSH tunnel. False for HTTP-API drivers whose "host" is a base URL.
+    public let supportsSSHTunnel: Bool
+    /// Whether generated SQL may qualify tables with the root `.database`
+    /// path component (`"db"."table"`). False when that component is only an
+    /// out-of-band routing label the backing engine cannot resolve (Metabase);
+    /// such tables are addressed by the remaining path and the driver routes
+    /// the query to the right database itself.
+    public let supportsDatabaseQualifiedSQL: Bool
+    /// Whether a fresh connection starts with every root namespace hidden so
+    /// the user explicitly picks what to show (drivers that expose an
+    /// unbounded, org-wide set of databases).
+    public let rootNamespacesDefaultHidden: Bool
+    /// Whether the app should hand table browsing to the driver as a
+    /// `.tableBrowse` query instead of generating `SELECT …` itself. True for
+    /// drivers whose databases span multiple SQL dialects (Metabase), where
+    /// only the driver knows the target engine's quoting and paging syntax.
+    public let buildsTableBrowseInDriver: Bool
 
     public init(
         id: String,
@@ -60,7 +78,11 @@ public struct DriverDescriptor: Sendable {
         supportsTableEditing: Bool = false,
         supportsDDL: Bool = false,
         explainSupport: ExplainSupport = .none,
-        activeNamespaceKind: ActiveNamespaceKind? = nil
+        activeNamespaceKind: ActiveNamespaceKind? = nil,
+        supportsSSHTunnel: Bool = true,
+        supportsDatabaseQualifiedSQL: Bool = true,
+        rootNamespacesDefaultHidden: Bool = false,
+        buildsTableBrowseInDriver: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -74,6 +96,10 @@ public struct DriverDescriptor: Sendable {
         self.supportsDDL = supportsDDL
         self.explainSupport = explainSupport
         self.activeNamespaceKind = activeNamespaceKind
+        self.supportsSSHTunnel = supportsSSHTunnel
+        self.supportsDatabaseQualifiedSQL = supportsDatabaseQualifiedSQL
+        self.rootNamespacesDefaultHidden = rootNamespacesDefaultHidden
+        self.buildsTableBrowseInDriver = buildsTableBrowseInDriver
     }
 
     /// Quotes an identifier for this driver's SQL dialect.
@@ -185,6 +211,34 @@ public enum DriverQuery: Sendable {
     case sql(String)
     /// v1 Mongo model: collection + operation + JSON filter/pipeline document.
     case mongo(collection: String, operation: MongoOperation, body: String)
+    /// Structured "browse one table" request. Drivers that advertise
+    /// `buildsTableBrowseInDriver` receive this instead of generated SQL, so a
+    /// driver spanning heterogeneous engines (Metabase) can emit SQL in the
+    /// dialect of the table's own database rather than a single fixed dialect.
+    case tableBrowse(TableBrowseRequest)
+}
+
+/// A read-only page over one table, addressed by its sidebar namespace path.
+public struct TableBrowseRequest: Sendable {
+    /// Namespace path of the table, e.g. ["db", "schema", "users"].
+    public let path: [String]
+    /// Columns to project, in table order; empty means all columns.
+    public let columns: [String]
+    /// Optional raw WHERE predicate typed by the user, sans the `WHERE` keyword.
+    public let filter: String?
+    public let limit: Int
+    public let offset: Int
+
+    public init(
+        path: [String], columns: [String] = [],
+        filter: String? = nil, limit: Int, offset: Int
+    ) {
+        self.path = path
+        self.columns = columns
+        self.filter = filter
+        self.limit = limit
+        self.offset = offset
+    }
 }
 
 public enum MongoOperation: String, Sendable, CaseIterable {
@@ -351,6 +405,10 @@ public struct DBError: Error, Sendable, CustomStringConvertible {
         case cancelled
         case unsupported
         case credentialResolutionFailed
+        /// A previously valid auth session (e.g. a Metabase SSO session token)
+        /// was rejected by the server. The UI reacts by prompting the user to
+        /// sign in again rather than showing a generic connection error.
+        case authenticationExpired
     }
 
     public let kind: Kind

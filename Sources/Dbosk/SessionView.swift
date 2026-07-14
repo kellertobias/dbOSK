@@ -192,17 +192,27 @@ struct SidebarView: View {
                 }
             }
             Section {
-                ForEach(session.sidebarRows(expanded: expandedIDs)) { row in
-                    SidebarOutlineRow(
-                        row: row,
-                        session: session,
-                        isExpanded: row.isExpandable && expandedIDs.contains(row.id),
-                        onToggleExpand: { toggleExpanded(row.id) },
-                        noteTarget: $noteTarget,
-                        groupTarget: $groupTarget,
-                        dropTableRequest: $dropTableRequest,
-                        createTableParent: $createTableParent)
-                        .equatable()
+                let rows = session.sidebarRows(expanded: expandedIDs)
+                // Everything at the root is hidden (drivers that default-hide
+                // their roots start this way on purpose): point at the
+                // visibility editor instead of showing an empty list. Other
+                // drivers keep a plain empty sidebar.
+                if rows.isEmpty && !session.rootNamespaces.isEmpty
+                    && session.descriptor.rootNamespacesDefaultHidden {
+                    allHiddenPlaceholder
+                } else {
+                    ForEach(rows) { row in
+                        SidebarOutlineRow(
+                            row: row,
+                            session: session,
+                            isExpanded: row.isExpandable && expandedIDs.contains(row.id),
+                            onToggleExpand: { toggleExpanded(row.id) },
+                            noteTarget: $noteTarget,
+                            groupTarget: $groupTarget,
+                            dropTableRequest: $dropTableRequest,
+                            createTableParent: $createTableParent)
+                            .equatable()
+                    }
                 }
             } header: {
                 HStack(spacing: 8) {
@@ -309,6 +319,22 @@ struct SidebarView: View {
         }
     }
 
+    /// Shown when every root namespace is hidden and the sidebar is not in
+    /// visibility-edit mode. Edit mode lists all rows (including hidden
+    /// ones) with checkboxes, so entering it is all the button needs to do.
+    private var allHiddenPlaceholder: some View {
+        VStack(spacing: 10) {
+            Text("No databases selected")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("Choose Databases…") { session.editingVisibility = true }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+    }
+
     private var renameAlertShown: Binding<Bool> {
         Binding(
             get: { renameTarget != nil },
@@ -380,6 +406,18 @@ private struct SidebarOutlineRow: View, @MainActor Equatable {
             groupRow(name: name, parent: parent)
         case .namespace(let namespace, let parent):
             namespaceRow(namespace, parent: parent)
+        case .emptyMessage(let text, _):
+            emptyRow(text)
+        }
+    }
+
+    private func emptyRow(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            indentAndChevron
+            Text(text)
+                .font(.callout)
+                .italic()
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -521,9 +559,14 @@ private struct TableRowMenu: View {
         Button("Open Table") { session.openTable(namespace) }
         Button("Show Structure") { session.openTable(namespace, mode: .structure) }
         Button("Query Table") {
-            session.openQueryTab(
-                initialSQL: SidebarNode.defaultQuery(for: namespace, in: session),
-                runImmediately: true)
+            // Point the connection at the table's database first when the
+            // generated SQL cannot name it (no-op for other drivers).
+            Task {
+                await session.switchToRootNamespaceIfNeeded(for: namespace)
+                session.openQueryTab(
+                    initialSQL: SidebarNode.defaultQuery(for: namespace, in: session),
+                    runImmediately: true)
+            }
         }
         Divider()
         Button(session.note(for: namespace) == nil ? "Add Note…" : "Edit Note…") {
@@ -594,6 +637,8 @@ enum SidebarNode {
     enum Kind: Equatable {
         case namespace(DBCore.Namespace, parent: DBCore.Namespace?)
         case group(String, parent: DBCore.Namespace)
+        /// A non-interactive "nothing here" row under an expanded, empty parent.
+        case emptyMessage(String, parent: DBCore.Namespace)
     }
 
     static func icon(for namespace: DBCore.Namespace) -> String {
@@ -614,7 +659,8 @@ enum SidebarNode {
         if descriptor.queryLanguage == .mongo {
             return "db.\(namespace.path.joined(separator: ".")).find({}).limit(100)"
         }
-        let path = namespace.path.map { descriptor.quoted($0) }.joined(separator: ".")
+        let path = descriptor.sqlTablePath(namespace.path)
+            .map { descriptor.quoted($0) }.joined(separator: ".")
         return "SELECT * FROM \(path) LIMIT 100;"
     }
 }
@@ -643,6 +689,7 @@ struct SidebarRow: Identifiable, Equatable {
         switch kind {
         case .namespace(let namespace, _): return namespace.id
         case .group(let name, let parent): return parent.id + "#group:" + name
+        case .emptyMessage(_, let parent): return parent.id + "#empty"
         }
     }
 
@@ -650,6 +697,7 @@ struct SidebarRow: Identifiable, Equatable {
         switch kind {
         case .group: return true
         case .namespace(let namespace, _): return namespace.isExpandable
+        case .emptyMessage: return false
         }
     }
 }

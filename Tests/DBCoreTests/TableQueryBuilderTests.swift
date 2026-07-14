@@ -96,6 +96,36 @@ import Testing
             == #"SELECT * FROM "people" WHERE active = true"#)
     }
 
+    @Test func dropsUnresolvableDatabaseQualifier() {
+        // Drivers whose root `.database` path component is only a routing
+        // label (supportsDatabaseQualifiedSQL == false) address tables by
+        // the remaining path.
+        let metabase = DriverDescriptor(
+            id: "metabase", displayName: "Metabase", queryLanguage: .sql,
+            defaultPort: nil, supportsStreaming: true,
+            supportsServerSideCancel: false,
+            activeNamespaceKind: .database,
+            supportsDatabaseQualifiedSQL: false,
+            rootNamespacesDefaultHidden: true)
+
+        let flat = Namespace(
+            path: ["Warehouse", "users"], kind: .table(.table), isExpandable: false)
+        #expect(TableQueryBuilder.build(.init(table: flat), for: metabase)
+            == #"SELECT * FROM "users" LIMIT 100 OFFSET 0"#)
+
+        let nested = Namespace(
+            path: ["Warehouse", "public", "users"], kind: .table(.table),
+            isExpandable: false)
+        #expect(TableQueryBuilder.build(.init(table: nested), for: metabase)
+            == #"SELECT * FROM "public"."users" LIMIT 100 OFFSET 0"#)
+
+        // Single-component paths are left alone.
+        #expect(metabase.sqlTablePath(["users"]) == ["users"])
+        // Drivers that can qualify keep the full path.
+        #expect(postgres.sqlTablePath(["db", "public", "users"])
+            == ["db", "public", "users"])
+    }
+
     @Test func clampsInvalidPaging() {
         let sql = TableQueryBuilder.build(
             .init(table: table, offset: -5, limit: 0), for: postgres)

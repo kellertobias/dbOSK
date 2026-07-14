@@ -1,5 +1,17 @@
 import Foundation
 
+extension DriverDescriptor {
+    /// The path components generated SQL addresses a table by. Drivers that
+    /// cannot resolve the root `.database` component in SQL (it is only a
+    /// routing label — `supportsDatabaseQualifiedSQL == false`) address
+    /// tables by the remaining path; the driver routes the query to the
+    /// right database itself via the active namespace.
+    public func sqlTablePath(_ path: [String]) -> [String] {
+        guard !supportsDatabaseQualifiedSQL, path.count > 1 else { return path }
+        return Array(path.dropFirst())
+    }
+}
+
 /// Builds the table-browser query text for a driver dialect. Kept in DBCore
 /// (rather than the UI layer) so it is unit-testable.
 public enum TableQueryBuilder {
@@ -51,7 +63,7 @@ public enum TableQueryBuilder {
             break
         }
 
-        let target = request.table.path
+        let target = descriptor.sqlTablePath(request.table.path)
             .map { descriptor.quoted($0) }
             .joined(separator: ".")
         let columns = request.columns.isEmpty

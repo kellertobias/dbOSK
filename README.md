@@ -15,6 +15,19 @@ loading (1Password CLI, AWS, …).
 | ![Query results grid](docs/sql-table.png) Browse table data with filters and paging | ![SQL query editor](docs/sql-query.png) Write and save complex SQL, browse results inline |
 | ![MongoDB structure](docs/mongo-structure.png) Same structure view for MongoDB collections | ![MongoDB document viewer](docs/mongo-data.png) Browse documents as JSON or tree |
 
+## Install with Homebrew
+
+This repository is its own Homebrew tap. Installing builds the app locally
+from source (requires Xcode 16+ and macOS 14+):
+
+```sh
+brew tap kellertobias/dbosk https://github.com/kellertobias/dbosk
+brew install --HEAD dbosk
+ln -sf "$(brew --prefix)/opt/dbosk/Dbosk.app" /Applications/Dbosk.app
+```
+
+Update later with `brew upgrade --fetch-HEAD dbosk`.
+
 ## Build & run (development)
 
 ```sh
