@@ -165,6 +165,10 @@ extension CompletionPopupController: NSTableViewDataSource, NSTableViewDelegate 
         let identifier = NSUserInterfaceItemIdentifier("candidateCell")
         let cell = tableView.makeView(withIdentifier: identifier, owner: nil)
             as? CompletionCellView ?? CompletionCellView(identifier: identifier)
+        // AppKit can request a row against a stale count when the item list is
+        // replaced mid-layout (async column data landing during a reload), so
+        // bounds-check like every other accessor here rather than trapping.
+        guard row >= 0, row < items.count else { return cell }
         cell.configure(with: items[row])
         return cell
     }
