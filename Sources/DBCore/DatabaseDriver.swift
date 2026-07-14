@@ -351,6 +351,10 @@ public struct DBError: Error, Sendable, CustomStringConvertible {
         case cancelled
         case unsupported
         case credentialResolutionFailed
+        /// A previously valid auth session (e.g. a Metabase SSO session token)
+        /// was rejected by the server. The UI reacts by prompting the user to
+        /// sign in again rather than showing a generic connection error.
+        case authenticationExpired
     }
 
     public let kind: Kind
