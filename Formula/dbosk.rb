@@ -23,7 +23,13 @@ class Dbosk < Formula
     ENV["DBOSK_VERSION"] = version.to_s unless build.head?
     system "Scripts/make-app.sh"
     prefix.install "dist/Dbosk.app"
-    (bin/"dbosk").write_exec_script prefix/"Dbosk.app/Contents/MacOS/Dbosk"
+    # Not write_exec_script: that treats the receiver as a directory and
+    # would produce bin/dbosk/Dbosk instead of a bin/dbosk launcher.
+    (bin/"dbosk").write <<~SCRIPT
+      #!/bin/bash
+      exec "#{opt_prefix}/Dbosk.app/Contents/MacOS/Dbosk" "$@"
+    SCRIPT
+    (bin/"dbosk").chmod 0755
   end
 
   def caveats
@@ -42,6 +48,7 @@ class Dbosk < Formula
 
   test do
     assert_path_exists prefix/"Dbosk.app/Contents/MacOS/Dbosk"
+    assert_predicate bin/"dbosk", :executable?
     system "/usr/bin/codesign", "--verify", prefix/"Dbosk.app"
   end
 end

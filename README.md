@@ -27,12 +27,17 @@ artifacts, which this project does not publish.
 # 1. Tap this repository (registers it as a third-party tap):
 brew tap kellertobias/dbosk https://github.com/kellertobias/dbosk
 
-# 2. Install from source. The fully-qualified name scopes trust to exactly
-#    this tap — it can never resolve to a same-named package from
+# 2. Trust only this one formula from the tap (Homebrew 6+ requires trusting
+#    non-official taps; trusting the single formula is narrower than
+#    trusting the whole tap):
+brew trust --formula kellertobias/dbosk/dbosk
+
+# 3. Install from source. The fully-qualified name scopes the install to
+#    exactly this tap — it can never resolve to a same-named package from
 #    homebrew/core or another tap:
 brew install --HEAD kellertobias/dbosk/dbosk
 
-# 3. Optional: make the app visible in Launchpad and Spotlight:
+# 4. Optional: make the app visible in Launchpad and Spotlight:
 ln -sf "$(brew --prefix)/opt/dbosk/Dbosk.app" /Applications/Dbosk.app
 ```
 
