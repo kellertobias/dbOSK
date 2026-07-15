@@ -34,8 +34,9 @@ class Dbosk < Formula
       To show it in Launchpad and Spotlight, link it into /Applications:
         ln -sf "#{opt_prefix}/Dbosk.app" /Applications/Dbosk.app
 
-      The app is ad-hoc signed (built locally), so Gatekeeper treats it as
-      an unsigned developer app.
+      The app was compiled locally and is ad-hoc signed. Because it was
+      built on this machine (not downloaded), it carries no quarantine
+      attribute and launches without a Gatekeeper prompt.
     EOS
   end
 

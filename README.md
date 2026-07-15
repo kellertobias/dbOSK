@@ -17,16 +17,56 @@ loading (1Password CLI, AWS, …).
 
 ## Install with Homebrew
 
-This repository is its own Homebrew tap. Installing builds the app locally
-from source (requires Xcode 16+ and macOS 14+):
+This repository is its own Homebrew tap. There is no prebuilt download or
+GitHub Release: `brew install` compiles the app from the `main` branch on
+your machine, so you need Xcode 16+ and macOS 14 (Sonoma) or newer. A
+formula is used rather than a cask because casks only install prebuilt
+artifacts, which this project does not publish.
 
 ```sh
+# 1. Tap this repository (registers it as a third-party tap):
 brew tap kellertobias/dbosk https://github.com/kellertobias/dbosk
-brew install --HEAD dbosk
+
+# 2. Install from source. The fully-qualified name scopes trust to exactly
+#    this tap — it can never resolve to a same-named package from
+#    homebrew/core or another tap:
+brew install --HEAD kellertobias/dbosk/dbosk
+
+# 3. Optional: make the app visible in Launchpad and Spotlight:
 ln -sf "$(brew --prefix)/opt/dbosk/Dbosk.app" /Applications/Dbosk.app
 ```
 
-Update later with `brew upgrade --fetch-HEAD dbosk`.
+Update to the latest `main` (rebuilds only when new commits exist):
+
+```sh
+brew update
+brew upgrade --fetch-HEAD kellertobias/dbosk/dbosk
+```
+
+Force a clean rebuild at the current commit:
+
+```sh
+brew reinstall kellertobias/dbosk/dbosk
+```
+
+Uninstall and remove the tap:
+
+```sh
+brew uninstall kellertobias/dbosk/dbosk
+brew untap kellertobias/dbosk
+```
+
+### Signing and Gatekeeper
+
+The Homebrew build is compiled locally and ad-hoc signed (`codesign --sign -`).
+Gatekeeper only assesses apps that carry the quarantine attribute, which macOS
+attaches to files downloaded by browsers and other quarantine-aware apps. An
+app compiled on your own machine is never quarantined, so it launches without
+any Gatekeeper prompt and no workarounds are needed. Distributing prebuilt
+binaries to other machines is different: those downloads *are* quarantined,
+and passing Gatekeeper then requires signing with a paid Apple Developer ID
+certificate plus notarization by Apple — `Scripts/make-app.sh` supports that
+via `DBOSK_SIGN_IDENTITY` (see below).
 
 ## Build & run (development)
 
