@@ -44,6 +44,11 @@ final class AppModel {
 
     init() {
         mcp = MCPServerController(keychain: keychain)
+        // Load the credentials vault now, off the main thread: the one
+        // Keychain prompt (if any) appears at app open, and every later
+        // access — connects, MCP token reads — is served from memory.
+        let store = keychain
+        Task.detached(priority: .utility) { store.preload() }
         labels = (try? labelStore.load()) ?? []
         profiles = (try? profileStore.load()) ?? []
         migrateLegacyColorTags()
