@@ -16,13 +16,6 @@ struct MCPSettingsView: View {
     @State private var installSheet: InstallInstructions?
     @State private var showConnectionSettings = false
     @State private var configuringProfile: ConnectionProfile?
-    @State private var installFeedback: InstallFeedback?
-    @State private var feedbackDismissal: Task<Void, Never>?
-
-    private struct InstallFeedback: Equatable {
-        let text: String
-        let isError: Bool
-    }
 
     private var controller: MCPServerController { appModel.mcp }
 
@@ -114,14 +107,14 @@ struct MCPSettingsView: View {
 
             Button("Show Connection Settings") { showConnectionSettings.toggle() }
         }
-        Text("“Install in Claude” configures Claude Code directly when its CLI "
-            + "is installed (otherwise the command lands on the clipboard); "
-            + "“Install in Cursor” opens Cursor's install dialog; the others "
-            + "show step-by-step instructions.")
+        Text("“Install in Claude” writes the server into Claude Code's and "
+            + "Claude Desktop's MCP configuration directly; “Install in "
+            + "Cursor” opens Cursor's install dialog; the others show "
+            + "step-by-step instructions.")
             .font(.caption)
             .foregroundStyle(.secondary)
 
-        if let feedback = installFeedback {
+        if let feedback = controller.installFeedback {
             Label(feedback.text, systemImage: feedback.isError
                 ? "exclamationmark.triangle" : "checkmark.circle.fill")
                 .font(.caption)
@@ -160,102 +153,37 @@ struct MCPSettingsView: View {
         return command
     }
 
-    /// Configures Claude Code directly via its CLI when installed; otherwise
-    /// copies the command and tells the user where to paste it.
+    /// Writes the server into Claude Code's (`~/.claude.json`, via the CLI
+    /// when available) and Claude Desktop's (`claude_desktop_config.json`)
+    /// MCP configuration. The clipboard command is only the failure fallback.
     private func installInClaude() {
         let endpoint = controller.endpointURL
-        let header = authRequired ? "Authorization: Bearer \(controller.token())" : nil
-        guard let binary = Self.claudeBinaryPath() else {
-            copyToPasteboard(claudeCommand)
-            showFeedback(
-                "Copied to clipboard — the claude CLI wasn't found. Paste the "
-                + "command into a terminal to finish installing.")
-            return
-        }
-        showFeedback("Configuring Claude Code…")
+        let token = authRequired ? controller.token() : nil
+        let fallbackCommand = claudeCommand
+        let controller = self.controller
+        controller.showInstallFeedback("Configuring Claude…")
         Task {
-            let result = await Self.runClaudeInstall(
-                binary: binary, endpoint: endpoint, header: header)
-            switch result {
-            case .success:
-                showFeedback(
-                    "Installed in Claude Code (user scope). New Claude Code "
-                    + "sessions can use the dbosk tools right away.")
-            case .failure(let message):
-                copyToPasteboard(claudeCommand)
-                showFeedback(
-                    "Claude CLI reported an error (\(message)). The command was "
-                    + "copied to the clipboard — paste it into a terminal instead.",
-                    isError: true)
+            let outcome = await ClaudeInstaller.install(
+                endpoint: endpoint, bearerToken: token)
+            var parts: [String] = []
+            if !outcome.configured.isEmpty {
+                parts.append(
+                    "Configured \(outcome.configured.joined(separator: " and ")). "
+                    + "Restart running sessions to pick it up.")
             }
-        }
-    }
-
-    private enum InstallResult {
-        case success
-        case failure(String)
-    }
-
-    private static func claudeBinaryPath() -> String? {
-        let home = NSHomeDirectory()
-        let candidates = [
-            "\(home)/.local/bin/claude",
-            "\(home)/.claude/local/claude",
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    /// Runs `claude mcp add` off the main actor (Process blocks). Re-adding
-    /// an existing server errors, so a best-effort `mcp remove` runs first —
-    /// this also keeps a regenerated token or changed port in sync.
-    private static func runClaudeInstall(
-        binary: String, endpoint: String, header: String?
-    ) async -> InstallResult {
-        await Task.detached(priority: .userInitiated) {
-            _ = run(binary: binary, arguments: ["mcp", "remove", "--scope", "user", "dbosk"])
-            var arguments = [
-                "mcp", "add", "--scope", "user", "--transport", "http", "dbosk", endpoint,
-            ]
-            if let header { arguments += ["--header", header] }
-            let result = run(binary: binary, arguments: arguments)
-            if result.exitCode == 0 { return InstallResult.success }
-            let detail = result.output
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .split(separator: "\n").last.map(String.init) ?? "exit \(result.exitCode)"
-            return InstallResult.failure(detail)
-        }.value
-    }
-
-    private nonisolated static func run(
-        binary: String, arguments: [String]
-    ) -> (exitCode: Int32, output: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return (-1, String(describing: error))
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
-    }
-
-    private func showFeedback(_ text: String, isError: Bool = false) {
-        withAnimation { installFeedback = InstallFeedback(text: text, isError: isError) }
-        feedbackDismissal?.cancel()
-        let current = installFeedback
-        feedbackDismissal = Task {
-            try? await Task.sleep(for: .seconds(8))
-            if !Task.isCancelled, installFeedback == current {
-                withAnimation { installFeedback = nil }
+            if !outcome.failures.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(fallbackCommand, forType: .string)
+                parts.append(
+                    outcome.failures.joined(separator: " · ")
+                    + " — the install command was copied to the clipboard; "
+                    + "paste it into a terminal instead.")
             }
+            if parts.isEmpty {
+                parts.append("Neither Claude Code nor Claude Desktop was found on this Mac.")
+            }
+            controller.showInstallFeedback(
+                parts.joined(separator: " "), isError: !outcome.failures.isEmpty)
         }
     }
 
@@ -272,12 +200,13 @@ struct MCPSettingsView: View {
             URLQueryItem(name: "config", value: data.base64EncodedString()),
         ]
         guard let url = components.url, NSWorkspace.shared.open(url) else {
-            showFeedback(
+            controller.showInstallFeedback(
                 "Cursor doesn't seem to be installed — use “Show Connection "
                 + "Settings” to configure it manually.", isError: true)
             return
         }
-        showFeedback("Opening Cursor — confirm the “Install MCP server” dialog there.")
+        controller.showInstallFeedback(
+            "Opening Cursor — confirm the “Install MCP server” dialog there.")
     }
 
     private var chatGPTInstructions: InstallInstructions {
@@ -307,7 +236,7 @@ struct MCPSettingsView: View {
             title: "Install in OpenCode",
             steps: [
                 "Merge the snippet below into ~/.config/opencode/opencode.json (or the project's opencode.json).",
-                "Restart OpenCode; the dbosk tools appear once the server is running.",
+                "Restart OpenCode; the dbOSK tools appear once the server is running.",
             ],
             fields: [InstallInstructions.Field(label: "opencode.json", value: json)])
     }
@@ -326,7 +255,7 @@ struct MCPSettingsView: View {
 
     @ViewBuilder private var connectionsSection: some View {
         Text("Connections").font(.headline)
-        Text("MCP clients can only reach connections that are active in dbosk "
+        Text("MCP clients can only reach connections that are active in dbOSK "
             + "and enabled here. Restrict each connection to selected tables "
             + "if needed.")
             .font(.caption)

@@ -22,9 +22,19 @@ final class MCPServerController {
     static let authRequiredKey = "mcpServerAuthRequired"
     static let defaultPort = 52814
 
+    struct InstallFeedback: Equatable {
+        let text: String
+        let isError: Bool
+    }
+
     private(set) var state: State = .stopped
+    /// Transient status line under the Install button ("Configured Claude
+    /// Code…"). Owned here rather than as view @State: the auto-dismiss task
+    /// must not outlive a view struct or touch its state off-actor.
+    private(set) var installFeedback: InstallFeedback?
     /// Bumped when settings change so views re-render derived snippets.
     private(set) var accessMap: [UUID: MCPAccessConfig]
+    @ObservationIgnored private var feedbackDismissal: Task<Void, Never>?
 
     private let accessStore = MCPAccessStore()
     private let keychain: KeychainStore
@@ -91,6 +101,19 @@ final class MCPServerController {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    // MARK: Install feedback
+
+    func showInstallFeedback(_ text: String, isError: Bool = false) {
+        installFeedback = InstallFeedback(text: text, isError: isError)
+        feedbackDismissal?.cancel()
+        let shown = installFeedback
+        feedbackDismissal = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled, let self, self.installFeedback == shown else { return }
+            self.installFeedback = nil
+        }
     }
 
     // MARK: Access map
