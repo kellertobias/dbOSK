@@ -1,0 +1,44 @@
+# Homebrew cask for dbosk. This repo doubles as its own tap:
+#
+#   brew tap kellertobias/dbosk https://github.com/kellertobias/dbosk
+#   brew install --cask kellertobias/dbosk/dbosk
+#
+# No prebuilt artifact is published: the cask downloads the main branch and
+# compiles the app locally in preflight, then the `app` stanza installs the
+# result to /Applications.
+cask "dbosk" do
+  version :latest
+  sha256 :no_check
+
+  url "https://github.com/kellertobias/dbosk/archive/refs/heads/main.tar.gz"
+  name "Dbosk"
+  desc "Native database client for PostgreSQL, MySQL/MariaDB, MongoDB, and SQLite"
+  homepage "https://github.com/kellertobias/dbosk"
+
+  depends_on macos: :sonoma
+
+  app "dbosk-main/dist/Dbosk.app"
+  binary "#{appdir}/Dbosk.app/Contents/MacOS/Dbosk", target: "dbosk"
+
+  preflight do
+    source = staged_path/"dbosk-main"
+    system_command "/bin/bash",
+                   args:         [(source/"Scripts/make-app.sh").to_s],
+                   print_stdout: true
+  end
+
+  zap trash: "~/Library/Preferences/dev.tobiaskeller.dbosk.plist"
+
+  caveats <<~EOS
+    Dbosk was compiled locally from the main branch. Building requires
+    Xcode 16+ and network access for SwiftPM dependencies.
+
+    The build is ad-hoc signed and not notarized, and Homebrew applies the
+    quarantine attribute to cask-installed apps, so macOS may block the
+    first launch. Approve it once via right-click -> Open, or under
+    System Settings -> Privacy & Security -> "Open Anyway".
+
+    `brew upgrade` cannot detect new commits (version :latest); update with:
+      brew reinstall --cask dbosk
+  EOS
+end

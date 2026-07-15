@@ -18,60 +18,52 @@ loading (1Password CLI, AWS, …).
 ## Install with Homebrew
 
 This repository is its own Homebrew tap. There is no prebuilt download or
-GitHub Release: `brew install` compiles the app from the `main` branch on
-your machine, so you need Xcode 16+ and macOS 14 (Sonoma) or newer. A
-formula is used rather than a cask because casks only install prebuilt
-artifacts, which this project does not publish.
+GitHub Release: the cask downloads the `main` branch source archive and
+compiles the app on your machine during install, then places `Dbosk.app`
+in `/Applications` automatically. You need Xcode 16+ and macOS 14 (Sonoma)
+or newer.
 
 ```sh
 # 1. Tap this repository (registers it as a third-party tap):
 brew tap kellertobias/dbosk https://github.com/kellertobias/dbosk
 
-# 2. Trust only this one formula from the tap (Homebrew 6+ requires trusting
-#    non-official taps; trusting the single formula is narrower than
-#    trusting the whole tap):
-brew trust --formula kellertobias/dbosk/dbosk
+# 2. Trust only this one cask from the tap (Homebrew 6+ requires trusting
+#    non-official taps; trusting the single cask is narrower than trusting
+#    the whole tap):
+brew trust --cask kellertobias/dbosk/dbosk
 
-# 3. Install from source. The fully-qualified name scopes the install to
-#    exactly this tap — it can never resolve to a same-named package from
-#    homebrew/core or another tap:
-brew install --HEAD kellertobias/dbosk/dbosk
-
-# 4. Optional: make the app visible in Launchpad and Spotlight:
-ln -sf "$(brew --prefix)/opt/dbosk/Dbosk.app" /Applications/Dbosk.app
+# 3. Install: builds from source, then installs Dbosk.app to /Applications.
+#    The fully-qualified name scopes the install to exactly this tap — it
+#    can never resolve to a same-named package from another tap:
+brew install --cask kellertobias/dbosk/dbosk
 ```
 
-Update to the latest `main` (rebuilds only when new commits exist):
+Update to the latest `main`, or force a clean rebuild (the cask tracks the
+branch head rather than a version, so `brew upgrade` cannot detect new
+commits — reinstalling is the update path):
 
 ```sh
-brew update
-brew upgrade --fetch-HEAD kellertobias/dbosk/dbosk
-```
-
-Force a clean rebuild at the current commit:
-
-```sh
-brew reinstall kellertobias/dbosk/dbosk
+brew reinstall --cask kellertobias/dbosk/dbosk
 ```
 
 Uninstall and remove the tap:
 
 ```sh
-brew uninstall kellertobias/dbosk/dbosk
+brew uninstall --cask kellertobias/dbosk/dbosk
 brew untap kellertobias/dbosk
 ```
 
 ### Signing and Gatekeeper
 
-The Homebrew build is compiled locally and ad-hoc signed (`codesign --sign -`).
-Gatekeeper only assesses apps that carry the quarantine attribute, which macOS
-attaches to files downloaded by browsers and other quarantine-aware apps. An
-app compiled on your own machine is never quarantined, so it launches without
-any Gatekeeper prompt and no workarounds are needed. Distributing prebuilt
-binaries to other machines is different: those downloads *are* quarantined,
-and passing Gatekeeper then requires signing with a paid Apple Developer ID
-certificate plus notarization by Apple — `Scripts/make-app.sh` supports that
-via `DBOSK_SIGN_IDENTITY` (see below).
+The build is compiled locally and ad-hoc signed (`codesign --sign -`), not
+notarized. Because the source arrives as a downloaded archive and Homebrew
+applies the quarantine attribute to cask-installed apps, Gatekeeper assesses
+the app on first launch and may block it. Approve it once via right-click →
+Open, or System Settings → Privacy & Security → "Open Anyway"; subsequent
+launches are unaffected. Distribution without that prompt would require
+signing with a paid Apple Developer ID certificate plus notarization by
+Apple — `Scripts/make-app.sh` supports that via `DBOSK_SIGN_IDENTITY`
+(see below).
 
 ## Build & run (development)
 
