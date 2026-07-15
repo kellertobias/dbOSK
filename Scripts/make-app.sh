@@ -1,9 +1,9 @@
 #!/bin/bash
-# Builds Dbosk.app from the SPM executable.
+# Builds dbOSK.app from the SPM executable.
 #
 # Usage:
-#   Scripts/make-app.sh            # release build, ad-hoc signed -> dist/Dbosk.app
-#   Scripts/make-app.sh --dmg      # also produce dist/Dbosk.dmg
+#   Scripts/make-app.sh            # release build, ad-hoc signed -> dist/dbOSK.app
+#   Scripts/make-app.sh --dmg      # also produce dist/dbOSK.dmg
 #
 # Environment:
 #   DBOSK_SIGN_IDENTITY      Developer ID Application identity for real signing
@@ -12,16 +12,18 @@
 #                            ready for `xcrun notarytool submit`.
 #   DBOSK_SWIFT_BUILD_FLAGS  Extra flags for `swift build` (e.g. the Homebrew
 #                            formula passes --disable-sandbox).
-#   DBOSK_VERSION            Override the bundle version (default: 0.1.0).
+#   DBOSK_VERSION            Override the bundle version (default: the VERSION
+#                            file at the repo root, maintained by the Forgejo
+#                            release workflow; falls back to 0.1.0).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_NAME="Dbosk"
+APP_NAME="dbOSK"
 # Keep in sync with nothing else: this script is the single source of truth
 # for the bundle (./build archive install copies its output). UserDefaults
 # are scoped to this id, so changing it orphans existing preferences.
 BUNDLE_ID="dev.tobiaskeller.dbosk"
-VERSION="${DBOSK_VERSION:-0.1.0}"
+VERSION="${DBOSK_VERSION:-$(tr -d '[:space:]' < VERSION 2>/dev/null || echo 0.1.0)}"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 IDENTITY="${DBOSK_SIGN_IDENTITY:--}"

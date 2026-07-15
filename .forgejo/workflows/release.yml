@@ -1,0 +1,51 @@
+name: release
+
+# Semantic-release style version bump. On every push to main we derive the
+# next version from the commit messages since the last tag (see
+# Scripts/bump-version.sh), write it to VERSION, then commit + tag + push.
+#
+# Loop prevention: the bump commit is "chore(release): ... [skip ci]" and the
+# job below is guarded to skip those, so the release push never triggers itself.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    # Skip the workflow's own release commit (and any [skip ci] commit).
+    if: >-
+      ${{ !startsWith(github.event.head_commit.message, 'chore(release):')
+          && !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so `git describe --tags` and the commit-range scan work.
+          fetch-depth: 0
+          # PAT with contents:write on this repo. Using a dedicated token (not
+          # the automatic one) ensures the push back to main is authenticated.
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Compute next version
+        id: bump
+        run: |
+          new="$(bash Scripts/bump-version.sh)"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "Next version: $new"
+
+      - name: Commit, tag and push
+        run: |
+          new="${{ steps.bump.outputs.version }}"
+          if git diff --quiet -- VERSION; then
+            echo "VERSION unchanged; nothing to release."
+            exit 0
+          fi
+          git config user.name  "forgejo-actions[bot]"
+          git config user.email "forgejo-actions@git.tokenet.de"
+          git add VERSION
+          git commit -m "chore(release): $new [skip ci]"
+          git tag "v$new"
+          git push origin HEAD:main
+          git push origin "v$new"
