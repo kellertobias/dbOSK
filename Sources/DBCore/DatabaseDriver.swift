@@ -131,6 +131,10 @@ public struct ResolvedConnectionConfig: Sendable {
     /// Secret-free note about how credentials were resolved (e.g. which keys
     /// an AWS secret contained), appended to connection errors for debugging.
     public var credentialDiagnostics: String?
+    /// Requests an engine-enforced read-only session (MCP connections):
+    /// Postgres `SET default_transaction_read_only`, MySQL
+    /// `SET SESSION transaction_read_only`, SQLite read-only open.
+    public var readOnly: Bool
 
     public init(
         host: String? = nil,
@@ -141,7 +145,8 @@ public struct ResolvedConnectionConfig: Sendable {
         uri: String? = nil,
         filePath: String? = nil,
         tls: TLSMode = .preferred,
-        credentialDiagnostics: String? = nil
+        credentialDiagnostics: String? = nil,
+        readOnly: Bool = false
     ) {
         self.host = host
         self.port = port
@@ -152,6 +157,7 @@ public struct ResolvedConnectionConfig: Sendable {
         self.filePath = filePath
         self.tls = tls
         self.credentialDiagnostics = credentialDiagnostics
+        self.readOnly = readOnly
     }
 }
 

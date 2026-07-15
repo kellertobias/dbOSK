@@ -206,6 +206,19 @@ private actor ConnectionActor {
         guard connection == nil else { return }
         do {
             let conn = try await Self.open(config: config, logger: logger)
+            if config.readOnly {
+                // Engine-enforced read-only session, applied before the
+                // connection is published so a failure can't leave a
+                // writable session behind. Inside connect() so transparent
+                // reconnects reapply it.
+                do {
+                    _ = try await conn.simpleQuery(
+                        "SET SESSION transaction_read_only = 1").get()
+                } catch {
+                    try? await conn.close().get()
+                    throw error
+                }
+            }
             connection = conn
             let rows = try await conn.query("SELECT CONNECTION_ID()").get()
             threadID = rows.first.flatMap { row in

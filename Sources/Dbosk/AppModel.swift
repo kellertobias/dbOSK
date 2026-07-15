@@ -39,11 +39,16 @@ final class AppModel {
     private let labelStore = LabelStore()
     private let resolver = CredentialResolver()
     let keychain = KeychainStore()
+    /// Local MCP server exposing enabled connections read-only.
+    let mcp: MCPServerController
 
     init() {
+        mcp = MCPServerController(keychain: keychain)
         labels = (try? labelStore.load()) ?? []
         profiles = (try? profileStore.load()) ?? []
         migrateLegacyColorTags()
+        mcp.configure(provider: AppModelMCPAdapter(appModel: self, controller: mcp))
+        mcp.startIfEnabled()
     }
 
     /// The label a profile carries, if any.
@@ -164,10 +169,13 @@ final class AppModel {
                 config.uri = nil  // a URI would bypass the tunnel
             }
 
-            let driver = try makeDriver(profile: profile, config: config)
+            let driver = try Self.makeDriver(profile: profile, config: config)
             try await driver.connect()
             let session = ConnectionSession(profile: profile, driver: driver)
             session.tunnel = tunnel
+            // Kept so the MCP server can open its dedicated read-only
+            // connection through the same (tunnel-rewritten) endpoint.
+            session.resolvedConfig = config
             sessions[profile.id] = session
             return true
         } catch {
@@ -191,11 +199,12 @@ final class AppModel {
 
     func disconnect(profileID: UUID) {
         let session = sessions.removeValue(forKey: profileID)
+        session?.teardownMCPDriver()
         session?.tunnel?.stop()
         Task { await session?.driver.disconnect() }
     }
 
-    private func makeDriver(
+    static func makeDriver(
         profile: ConnectionProfile, config: ResolvedConnectionConfig
     ) throws -> any DatabaseDriver {
         switch profile.driverID {
@@ -240,6 +249,14 @@ final class ConnectionSession: Identifiable {
 
     /// Live SSH tunnel carrying this session's connection, if any.
     var tunnel: SSHTunnel?
+    /// Post-resolution config captured at connect time (secrets stay in
+    /// memory only, per app policy); reused to open the dedicated read-only
+    /// MCP connection through the same tunnel-rewritten endpoint.
+    @ObservationIgnored var resolvedConfig: ResolvedConnectionConfig?
+    /// Lazily opened second connection used exclusively by the MCP server:
+    /// engine-enforced read-only, immune to the UI session's active-namespace
+    /// switches and single-connection query contention.
+    @ObservationIgnored private var mcpDriver: (any DatabaseDriver)?
     /// User metadata: saved queries, table notes, groups, hidden flags.
     var metadata: ConnectionMetadata
     /// Transient sidebar toggle to reveal hidden tables.
@@ -301,6 +318,35 @@ final class ConnectionSession: Identifiable {
         self.profile = profile
         self.driver = driver
         self.metadata = MetadataStore().load(for: profile.id)
+    }
+
+    // MARK: MCP read-only connection
+
+    /// The dedicated read-only driver for MCP queries, opened on first use.
+    func mcpReadOnlyDriver() async throws -> any DatabaseDriver {
+        if let mcpDriver { return mcpDriver }
+        guard var config = resolvedConfig else {
+            throw DBError(
+                kind: .connectionFailed,
+                message: "No resolved connection configuration available for an MCP connection")
+        }
+        config.readOnly = true
+        let driver = try AppModel.makeDriver(profile: profile, config: config)
+        try await driver.connect()
+        // Re-check after the suspension: a concurrent first call may have won.
+        if let existing = mcpDriver {
+            await driver.disconnect()
+            return existing
+        }
+        mcpDriver = driver
+        return driver
+    }
+
+    /// Closes the MCP connection (session disconnect, or MCP server stop).
+    func teardownMCPDriver() {
+        guard let driver = mcpDriver else { return }
+        mcpDriver = nil
+        Task { await driver.disconnect() }
     }
 
     // MARK: User metadata

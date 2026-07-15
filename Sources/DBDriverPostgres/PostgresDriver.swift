@@ -25,7 +25,9 @@ public final class PostgresDriver: DatabaseDriver, Sendable {
 
     public init(config: ResolvedConnectionConfig) throws {
         self.config = config
-        self.state = ConnectionActor(configuration: try Self.makeConfiguration(config))
+        self.state = ConnectionActor(
+            configuration: try Self.makeConfiguration(config),
+            readOnly: config.readOnly)
     }
 
     public func connect() async throws {
@@ -229,22 +231,37 @@ extension Array where Element == DBValue {
 /// Serializes access to the underlying PostgresConnection.
 private actor ConnectionActor {
     private let configuration: PostgresConnection.Configuration
+    private let readOnly: Bool
     private let logger = Logger(label: "dbosk.postgres")
     private var connection: PostgresConnection?
     private static let connectionID = ManagedAtomicCounter()
 
-    init(configuration: PostgresConnection.Configuration) {
+    init(configuration: PostgresConnection.Configuration, readOnly: Bool = false) {
         self.configuration = configuration
+        self.readOnly = readOnly
     }
 
     func connect() async throws {
         guard connection == nil else { return }
         do {
-            connection = try await PostgresConnection.connect(
+            let connection = try await PostgresConnection.connect(
                 configuration: configuration,
                 id: Self.connectionID.next(),
                 logger: logger
             )
+            if readOnly {
+                // Engine-enforced read-only session: every transaction on
+                // this connection defaults to READ ONLY, independent of any
+                // SQL-level gating done by the caller.
+                do {
+                    _ = try await connection.query(
+                        "SET default_transaction_read_only = on", logger: logger)
+                } catch {
+                    try? await connection.close()
+                    throw error
+                }
+            }
+            self.connection = connection
         } catch {
             throw DBError(
                 kind: .connectionFailed,

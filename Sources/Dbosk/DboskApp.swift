@@ -35,6 +35,8 @@ struct DboskApp: App {
                     .tabItem { Label("General", systemImage: "gearshape") }
                 LabelSettingsView()
                     .tabItem { Label("Labels", systemImage: "tag") }
+                MCPSettingsView()
+                    .tabItem { Label("MCP", systemImage: "server.rack") }
             }
             .environment(appModel)
         }

@@ -24,7 +24,7 @@ public final class SQLiteDriver: DatabaseDriver, Sendable {
             throw DBError(kind: .connectionFailed, message: "No SQLite file selected")
         }
         self.filePath = (filePath as NSString).expandingTildeInPath
-        self.state = ConnectionActor(path: self.filePath)
+        self.state = ConnectionActor(path: self.filePath, readOnly: config.readOnly)
     }
 
     public func connect() async throws {
@@ -178,10 +178,12 @@ extension Array where Element == DBValue {
 
 private actor ConnectionActor {
     private let path: String
+    private let readOnly: Bool
     private var queue: DatabaseQueue?
 
-    init(path: String) {
+    init(path: String, readOnly: Bool = false) {
         self.path = path
+        self.readOnly = readOnly
     }
 
     func connect() async throws {
@@ -191,7 +193,11 @@ private actor ConnectionActor {
                 kind: .connectionFailed, message: "File not found: \(path)")
         }
         do {
-            queue = try DatabaseQueue(path: path)
+            var configuration = Configuration()
+            // SQLite-enforced read-only open (SQLITE_OPEN_READONLY): writes
+            // fail at the engine, independent of SQL-level gating.
+            configuration.readonly = readOnly
+            queue = try DatabaseQueue(path: path, configuration: configuration)
         } catch {
             throw DBError(
                 kind: .connectionFailed,

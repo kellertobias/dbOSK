@@ -18,6 +18,15 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.29.0"),
         .package(url: "https://github.com/swift-server/RediStack.git", from: "1.6.0"),
         .package(url: "https://github.com/soto-project/soto.git", from: "7.0.0"),
+        // Pre-1.0 SDK, pinned to a commit: the 0.9.0 release does not compile
+        // under Swift 6.3's stricter sendability checking, main does. All SDK
+        // types stay inside the MCPServer target.
+        .package(
+            url: "https://github.com/modelcontextprotocol/swift-sdk.git",
+            revision: "a0ae212ebf6eab5f754c3129608bc5557637e605"),
+        // Already in the transitive graph via postgres-nio and friends; the
+        // MCP HTTP bridge uses it directly.
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
     targets: [
         .target(name: "DBCore"),
@@ -76,6 +85,18 @@ let package = Package(
                 .product(name: "SotoSecretsManager", package: "soto"),
             ]
         ),
+        .target(
+            name: "MCPServer",
+            dependencies: [
+                "DBCore",
+                "Connections",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
         .target(name: "Export", dependencies: ["DBCore"]),
         .target(name: "QueryEditor", dependencies: ["DBCore"]),
         .executableTarget(
@@ -83,7 +104,7 @@ let package = Package(
             dependencies: [
                 "DBCore", "DBDriverPostgres", "DBDriverMySQL", "DBDriverMongo",
                 "DBDriverSQLite", "DBDriverRedis", "DBDriverDynamoDB", "DBDriverMetabase",
-                "Connections", "Export", "QueryEditor",
+                "Connections", "Export", "QueryEditor", "MCPServer",
             ]
         ),
         .testTarget(name: "DBCoreTests", dependencies: ["DBCore"]),
@@ -98,6 +119,7 @@ let package = Package(
         .testTarget(name: "DBDriverDynamoDBTests", dependencies: ["DBDriverDynamoDB"]),
         .testTarget(name: "DBDriverMetabaseTests", dependencies: ["DBDriverMetabase"]),
         .testTarget(name: "ConnectionsTests", dependencies: ["Connections"]),
+        .testTarget(name: "MCPServerTests", dependencies: ["MCPServer"]),
         .testTarget(name: "ExportTests", dependencies: ["Export"]),
         .testTarget(name: "QueryEditorTests", dependencies: ["QueryEditor"]),
     ]
