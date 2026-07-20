@@ -11,6 +11,9 @@ struct ResultsTableView: NSViewRepresentable {
     let rows: [ResultRow]
     let version: Int
     var editing: EditingConfig?
+    /// Called with (row, columnIndex) when a cell is chosen for inspection —
+    /// single left-click (read-only) or the "Inspect Cell" context item.
+    var onInspect: ((Int, Int) -> Void)?
 
     /// How one cell should render under staged editing.
     struct CellDisplay: Equatable {
@@ -45,9 +48,15 @@ struct ResultsTableView: NSViewRepresentable {
         tableView.rowHeight = 20
         tableView.dataSource = context.coordinator
         tableView.delegate = context.coordinator
+        tableView.target = context.coordinator
+        tableView.action = #selector(Coordinator.cellClicked(_:))
         context.coordinator.tableView = tableView
 
         let menu = NSMenu()
+        menu.addItem(NSMenuItem(
+            title: "Inspect Cell", action: #selector(Coordinator.inspectCell(_:)),
+            keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(
             title: "Copy Cell", action: #selector(Coordinator.copyCell(_:)),
             keyEquivalent: ""))
@@ -92,6 +101,7 @@ struct ResultsTableView: NSViewRepresentable {
         let coordinator = context.coordinator
         // Closures capture fresh model state; refresh them on every update.
         coordinator.editing = editing
+        coordinator.onInspect = onInspect
         guard coordinator.version != version else { return }
         let columnsChanged = coordinator.columns != columns
         let previousRowCount = coordinator.rows.count
@@ -122,6 +132,7 @@ struct ResultsTableView: NSViewRepresentable {
         var rows: [ResultRow] = []
         var version = -1
         var editing: EditingConfig?
+        var onInspect: ((Int, Int) -> Void)?
         weak var tableView: NSTableView?
 
         func rebuildColumns(in tableView: NSTableView) {
@@ -145,6 +156,25 @@ struct ResultsTableView: NSViewRepresentable {
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard let tableView else { return }
             editing?.onSelectionChanged(tableView.selectedRowIndexes)
+        }
+
+        // MARK: Inspection
+
+        /// Single left-click on a read-only cell opens the inspector. Skipped
+        /// while editing, where a click focuses the cell's text field instead
+        /// (the "Inspect Cell" context item covers that mode).
+        @objc func cellClicked(_ sender: Any?) {
+            guard editing == nil, let tableView,
+                  tableView.clickedRow >= 0, tableView.clickedColumn >= 0
+            else { return }
+            onInspect?(tableView.clickedRow, tableView.clickedColumn)
+        }
+
+        @objc func inspectCell(_ sender: Any?) {
+            guard let tableView,
+                  tableView.clickedRow >= 0, tableView.clickedColumn >= 0
+            else { return }
+            onInspect?(tableView.clickedRow, tableView.clickedColumn)
         }
 
         // MARK: Copy actions (context menu)

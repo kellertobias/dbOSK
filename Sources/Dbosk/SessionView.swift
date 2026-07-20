@@ -951,21 +951,57 @@ struct ResultsArea: View {
     let version: Int
     let mode: ResultsViewMode
     var editing: ResultsTableView.EditingConfig?
+    /// Cell currently shown in the trailing inspector; nil hides it.
+    @State private var inspected: InspectedCell?
 
     private var isDocumentShaped: Bool {
         ResultsViewMode.isDocumentShaped(columns)
     }
 
     var body: some View {
+        resultsContent
+            .inspector(isPresented: Binding(
+                get: { inspected != nil },
+                set: { if !$0 { inspected = nil } }
+            )) {
+                Group {
+                    if let inspected {
+                        CellInspectorView(cell: inspected) { self.inspected = nil }
+                    } else {
+                        // Kept out of the tree while closed; nothing to show.
+                        Color.clear
+                    }
+                }
+                .inspectorColumnWidth(min: 280, ideal: 380, max: 720)
+            }
+            // A newly loaded/changed result set may not contain the inspected
+            // cell anymore; close the inspector rather than show a stale value.
+            .onChange(of: version) { inspected = nil }
+    }
+
+    @ViewBuilder
+    private var resultsContent: some View {
         switch mode {
         case .table:
             ResultsTableView(
-                columns: columns, rows: rows, version: version, editing: editing)
+                columns: columns, rows: rows, version: version, editing: editing,
+                onInspect: { row, column in inspect(row: row, column: column) })
         case .tree:
             DocumentResultsView(rows: documentRows, detailMode: .tree)
         case .json:
             DocumentResultsView(rows: documentRows, detailMode: .json)
         }
+    }
+
+    /// Resolves a clicked (row, column) to its value and opens the inspector.
+    private func inspect(row: Int, column: Int) {
+        guard row < rows.count, column < columns.count else { return }
+        let values = rows[row].values
+        guard column < values.count else { return }
+        inspected = InspectedCell(
+            columnName: columns[column].name,
+            columnType: columns[column].dbTypeName,
+            value: values[column])
     }
 
     /// Document-shaped results pass through; tabular rows become one
