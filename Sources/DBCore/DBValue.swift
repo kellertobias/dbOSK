@@ -20,6 +20,19 @@ public enum DBValue: Sendable, Hashable {
 }
 
 extension DBValue {
+    /// Best-effort integer view. Used for scalar count queries, whose engines
+    /// return the total as an int, a bigint (kept as decimal text to avoid
+    /// precision loss), or occasionally a string. Nil when non-numeric.
+    public var asInt: Int? {
+        switch self {
+        case .int(let i): return Int(i)
+        case .double(let d): return Int(d)
+        case .decimal(let s), .string(let s):
+            return Int(s.trimmingCharacters(in: .whitespaces))
+        default: return nil
+        }
+    }
+
     /// Compact single-line representation for table cells.
     public var displayString: String {
         switch self {

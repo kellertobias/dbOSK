@@ -13,6 +13,18 @@ import Testing
         #expect(DBValue.bytes(Data([1, 2, 3])).displayString == "0x… (3 bytes)")
     }
 
+    @Test func asIntParsesNumericForms() {
+        // Count queries come back as int, bigint-as-decimal, or string.
+        #expect(DBValue.int(42).asInt == 42)
+        #expect(DBValue.decimal("1234567").asInt == 1_234_567)
+        #expect(DBValue.string(" 89 ").asInt == 89)
+        #expect(DBValue.double(3.0).asInt == 3)
+        // Non-numeric values have no integer view.
+        #expect(DBValue.null.asInt == nil)
+        #expect(DBValue.string("n/a").asInt == nil)
+        #expect(DBValue.decimal("12.5").asInt == nil)
+    }
+
     @Test func jsonRoundtrip() throws {
         let value = DBValue.document([
             "name": .string("ada"),

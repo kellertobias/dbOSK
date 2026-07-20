@@ -481,10 +481,47 @@ public protocol DatabaseDriver: Sendable {
     /// Only meaningful when the descriptor advertises `activeNamespaceKind`.
     /// Defaults to running the dialect statement through `execute`.
     func setActiveNamespace(_ name: String?) async throws
+
+    /// An approximate total row count for `table`, honoring `filter` (a raw
+    /// WHERE predicate without the keyword) when given. Powers the table
+    /// browser's "of ~N" total. Returns nil when the driver can't estimate
+    /// cheaply. The default runs `COUNT(*)` for SQL drivers that browse via
+    /// generated SQL; instant catalog-based estimates are per-driver overrides.
+    func estimatedRowCount(of table: Namespace, matching filter: String?) async throws -> Int?
 }
 
 extension DatabaseDriver {
     public func updateAuthToken(_ token: String) async {}
+
+    public func estimatedRowCount(
+        of table: Namespace, matching filter: String?
+    ) async throws -> Int? {
+        let descriptor = Self.descriptor
+        // Only drivers that browse via generated SQL can take a generated
+        // COUNT(*). Mongo/Redis/PartiQL and SQL drivers that build their
+        // browse requests internally (Metabase) opt out unless they override.
+        guard descriptor.queryLanguage == .sql,
+              !descriptor.buildsTableBrowseInDriver else { return nil }
+        let target = descriptor.sqlTablePath(table.path)
+            .map { descriptor.quoted($0) }
+            .joined(separator: ".")
+        var sql = "SELECT COUNT(*) FROM \(target)"
+        if let filter, !filter.isEmpty { sql += " WHERE \(filter)" }
+        return try await scalarInt(sql)
+    }
+
+    /// Runs a single-value SQL query and returns its first column as an Int,
+    /// or nil when the result is empty or non-numeric. Shared by the
+    /// `estimatedRowCount` implementations.
+    public func scalarInt(_ sql: String) async throws -> Int? {
+        let execution = try await execute(.sql(sql), pageSize: 1)
+        for try await chunk in execution.chunks {
+            if let value = chunk.rows.first?.values.first {
+                return value.asInt
+            }
+        }
+        return nil
+    }
 
     public func describeTable(_ table: Namespace) async throws -> TableStructure {
         let columns = try await listColumns(of: table)

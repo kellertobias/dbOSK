@@ -164,6 +164,34 @@ public final class MySQLDriver: DatabaseDriver, Sendable {
         return try await state.execute(sql: sql, pageSize: pageSize)
     }
 
+    public func estimatedRowCount(
+        of table: Namespace, matching filter: String?
+    ) async throws -> Int? {
+        let target = Self.descriptor.sqlTablePath(table.path)
+            .map { Self.descriptor.quoted($0) }
+            .joined(separator: ".")
+        if let filter, !filter.isEmpty {
+            return try await scalarInt("SELECT COUNT(*) FROM \(target) WHERE \(filter)")
+        }
+        // information_schema.TABLES.TABLE_ROWS is the engine's cached estimate
+        // (exact for MyISAM, approximate for InnoDB) — instant on huge tables.
+        // NULL for views and 0 before the table is populated, so fall back to
+        // an exact COUNT(*) whenever it isn't a usable positive estimate.
+        let name = table.path.last ?? ""
+        let schema = table.path.count >= 2 ? table.path[table.path.count - 2] : nil
+        func lit(_ s: String) -> String {
+            "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
+        }
+        let schemaPredicate = schema.map { "TABLE_SCHEMA = \(lit($0))" }
+            ?? "TABLE_SCHEMA = DATABASE()"
+        let sql = "SELECT TABLE_ROWS FROM information_schema.TABLES "
+            + "WHERE \(schemaPredicate) AND TABLE_NAME = \(lit(name))"
+        if let estimate = try? await scalarInt(sql), estimate > 0 {
+            return estimate
+        }
+        return try await scalarInt("SELECT COUNT(*) FROM \(target)")
+    }
+
     /// Overrides the DBCore default: `USE` is rejected by the prepared-
     /// statement protocol the normal execute path speaks, so it runs over
     /// the text protocol, and the actor remembers it across reconnects.

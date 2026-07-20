@@ -166,6 +166,30 @@ public final class PostgresDriver: DatabaseDriver, Sendable {
         return try await state.execute(sql: sql, pageSize: pageSize)
     }
 
+    public func estimatedRowCount(
+        of table: Namespace, matching filter: String?
+    ) async throws -> Int? {
+        let target = Self.descriptor.sqlTablePath(table.path)
+            .map { Self.descriptor.quoted($0) }
+            .joined(separator: ".")
+        // A filtered browse needs an exact count; only the whole-table total
+        // can use the planner's cached estimate.
+        if let filter, !filter.isEmpty {
+            return try await scalarInt("SELECT COUNT(*) FROM \(target) WHERE \(filter)")
+        }
+        // `reltuples` is the planner's cached row estimate — instant even on
+        // huge tables. It's <= 0 until the table is analyzed (and 0 for a
+        // genuinely empty one), so fall back to an exact (but then cheap)
+        // COUNT(*) whenever it isn't a usable positive estimate.
+        let literal = target.replacingOccurrences(of: "'", with: "''")
+        if let estimate = try? await scalarInt(
+            "SELECT reltuples::bigint FROM pg_class WHERE oid = '\(literal)'::regclass"),
+           estimate > 0 {
+            return estimate
+        }
+        return try await scalarInt("SELECT COUNT(*) FROM \(target)")
+    }
+
     // MARK: - Configuration
 
     private static func makeConfiguration(

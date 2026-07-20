@@ -1134,6 +1134,15 @@ final class TableBrowser {
     var columnsError: String?
     var isLoadingColumns = false
 
+    /// Approximate total rows for the current table+filter, shown in the
+    /// status bar's "of ~N". Nil while unknown, loading, or when the driver
+    /// can't estimate cheaply.
+    var rowEstimate: Int?
+    /// table+filter the current `rowEstimate` was fetched for, so page turns
+    /// and column changes (which don't affect the total) reuse it.
+    private var rowEstimateKey: String?
+    private var rowEstimateTask: Task<Void, Never>?
+
     /// Structure-mode state, loaded lazily on first switch to `.structure`.
     var structure: TableStructure?
     var structureError: String?
@@ -1225,6 +1234,7 @@ final class TableBrowser {
 
     func load() {
         guard let table, let query = builtQuery else { return }
+        refreshRowEstimate()
         resultTab.queryText = query
         // When the driver builds its own browse SQL (heterogeneous engines
         // behind one connection), hand it the structured request; the query
@@ -1248,6 +1258,29 @@ final class TableBrowser {
             }
         } else {
             resultTab.run()
+        }
+    }
+
+    /// Fetches the total-row estimate when the table or filter changed, but
+    /// not on page turns or column toggles (the total is independent of both).
+    /// Keyed on table+filter so repeated `load()` calls reuse the last value.
+    private func refreshRowEstimate() {
+        guard let table else {
+            rowEstimate = nil
+            rowEstimateKey = nil
+            return
+        }
+        let filter = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = table.pathKey + "\u{1F}" + filter
+        guard key != rowEstimateKey else { return }
+        rowEstimateKey = key
+        rowEstimate = nil
+        rowEstimateTask?.cancel()
+        let filterArg = filter.isEmpty ? nil : filter
+        rowEstimateTask = Task { [driver, table] in
+            let value = try? await driver.estimatedRowCount(of: table, matching: filterArg)
+            guard !Task.isCancelled else { return }
+            rowEstimate = value
         }
     }
 

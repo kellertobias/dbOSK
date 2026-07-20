@@ -308,7 +308,8 @@ struct TableModeView: View {
                 ProgressView().controlSize(.small)
                 Text("Loading…")
             case .done(let count, let elapsed):
-                Text("Rows \(browser.offset)–\(browser.offset + count) · \(String(format: "%.2f", elapsed))s")
+                let total = browser.rowEstimate.map { " of ~\($0.formatted())" } ?? ""
+                Text("Rows \(browser.offset)–\(browser.offset + count)\(total) · \(String(format: "%.2f", elapsed))s")
             case .failed(let message):
                 Text(message).foregroundStyle(.red).textSelection(.enabled)
             case .cancelled:
