@@ -479,6 +479,11 @@ private struct SidebarOutlineRow: View, @MainActor Equatable {
                 .foregroundStyle(.secondary)
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .frame(width: 12)
+        } else {
+            // Reserve the chevron's slot on leaf rows (tables) too, so they
+            // line up one level in from their expandable parent instead of
+            // sitting flush under its disclosure triangle.
+            Spacer().frame(width: 12)
         }
     }
 
@@ -667,10 +672,32 @@ private struct ContainerRowMenu: View {
         let kindLabel = namespace.kind == .database ? "Database" : "Schema"
         let isHidden = session.isHidden(namespace)
         Button("New Query") { session.openQueryTab() }
+        Button("Refresh Tables") {
+            Task { await session.reloadChildren(of: namespace) }
+        }
+        Divider()
         Button(isHidden ? "Unhide \(kindLabel)" : "Hide \(kindLabel)") {
             session.setHidden(!isHidden, for: namespace)
         }
         Button("Show All Tables") { session.unhideAll(in: namespace) }
+        Divider()
+        Button("Copy Table Selection") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                session.exportTableConfigJSON(), forType: .string)
+        }
+        Button("Paste Table Selection") {
+            guard let json = NSPasteboard.general.string(forType: .string) else {
+                session.sidebarError = "Clipboard is empty."
+                return
+            }
+            if session.importTableConfig(fromJSON: json) == nil {
+                session.sidebarError =
+                    "Clipboard doesn't contain a valid table selection."
+            } else {
+                session.sidebarError = nil
+            }
+        }
         if session.descriptor.supportsDDL {
             Divider()
             Button("New Table…") { createTableParent = namespace }

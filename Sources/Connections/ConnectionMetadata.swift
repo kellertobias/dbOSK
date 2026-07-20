@@ -172,6 +172,21 @@ public struct ConnectionMetadata: Codable, Sendable, Equatable {
     }
 }
 
+/// A portable snapshot of a connection's table annotations (which tables
+/// are visible, their groups, and notes), for copying to the clipboard and
+/// pasting into another person's dbOSK on the same database.
+public struct TableConfigPayload: Codable, Sendable, Equatable {
+    /// Bumped if the shape ever changes so old clipboards can be rejected.
+    public var version: Int
+    /// Same `[Self.key(for:)]`-keyed shape as `ConnectionMetadata.tables`.
+    public var tables: [String: TableMeta]
+
+    public init(tables: [String: TableMeta], version: Int = 1) {
+        self.version = version
+        self.tables = tables
+    }
+}
+
 /// Loads/saves per-profile metadata JSON files.
 public struct MetadataStore: Sendable {
     private let directory: URL

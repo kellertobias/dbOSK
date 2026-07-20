@@ -189,4 +189,24 @@ import Testing
         #expect(metadata.meta(for: ["other", "t"]).group == "Core")
         #expect(metadata.tables.count == 1)
     }
+
+    @Test func tableConfigPayloadRoundtrips() throws {
+        var metadata = ConnectionMetadata()
+        metadata.update(["public", "users"]) { $0.hidden = true }
+        metadata.update(["public", "orders"]) {
+            $0.group = "Core"
+            $0.note = "billing"
+        }
+
+        let encoded = try JSONEncoder().encode(TableConfigPayload(tables: metadata.tables))
+        let decoded = try JSONDecoder().decode(TableConfigPayload.self, from: encoded)
+
+        #expect(decoded.version == 1)
+        #expect(decoded.tables == metadata.tables)
+        // Pasting the payload into a fresh connection reproduces the selection.
+        var recipient = ConnectionMetadata()
+        recipient.tables = decoded.tables
+        #expect(recipient.meta(for: ["public", "users"]).hidden)
+        #expect(recipient.meta(for: ["public", "orders"]).group == "Core")
+    }
 }

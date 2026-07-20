@@ -484,6 +484,33 @@ final class ConnectionSession: Identifiable {
         persistMetadata()
     }
 
+    // MARK: Table config transfer
+
+    /// Serialises the connection's table annotations (visibility, groups,
+    /// notes) as portable JSON, for copying to the clipboard and handing to
+    /// another person on the same database.
+    func exportTableConfigJSON() -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(TableConfigPayload(tables: metadata.tables)),
+              let json = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return json
+    }
+
+    /// Replaces the table annotations from a pasted config, returning the
+    /// number of entries applied, or nil when the text isn't a valid config.
+    @discardableResult
+    func importTableConfig(fromJSON json: String) -> Int? {
+        guard let data = json.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(TableConfigPayload.self, from: data)
+        else { return nil }
+        metadata.tables = payload.tables
+        invalidateSidebarNodes()
+        persistMetadata()
+        return payload.tables.count
+    }
+
     // MARK: Sidebar tree
 
     private func invalidateSidebarNodes() {
