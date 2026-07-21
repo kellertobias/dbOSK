@@ -1,0 +1,120 @@
+name: Release
+
+# GitHub is a push mirror of the Forgejo repository. Forgejo owns versioning and creates
+# the v* tag (see .forgejo/workflows/release.yml); this workflow reacts to the mirrored
+# tag, builds dbOSK, and — only if the build succeeds — publishes a GitHub Release with
+# the app attached.
+#
+# dbOSK is an AppKit/SwiftUI app: it can only be compiled against the macOS SDK, so the
+# `build` job must run on a macOS runner (GitHub-hosted `macos-14`, a managed VM — no
+# self-hosted macOS runner needed). The build is UNIVERSAL (arm64 + x86_64), so the
+# release runs on both Apple Silicon and Intel Macs. It is ad-hoc signed only (no Apple
+# Developer account), so the binary is not notarized. The `publish` job runs on Linux.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Rebuild an existing tag, or build an arbitrary ref without publishing, on demand.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (e.g. v1.2.3). Leave empty to build the current ref without publishing.
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build universal macOS app
+    # macos-14 is a GitHub-hosted Apple Silicon runner; it cross-compiles the x86_64 slice.
+    runs-on: macos-14
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Swift toolchain
+        run: swift --version
+
+      - name: Build and package the universal app (.app + .dmg)
+        id: build
+        env:
+          REF: ${{ github.event.inputs.tag || github.ref_name }}
+          # Universal binary: make-app.sh forwards these to `swift build` and resolves
+          # the products dir via `--show-bin-path`, so the fat binary is bundled.
+          DBOSK_SWIFT_BUILD_FLAGS: --arch arm64 --arch x86_64
+        run: |
+          set -euo pipefail
+          # Pin the bundle version to the tag so filenames and CFBundleShortVersionString
+          # match the release, regardless of the committed VERSION file.
+          case "$REF" in
+            v*) VERSION="${REF#v}" ;;
+            *)  VERSION="$(tr -d '[:space:]' < VERSION)" ;;
+          esac
+          export DBOSK_VERSION="$VERSION"
+
+          Scripts/make-app.sh --dmg
+
+          echo "==> Verifying universal binary"
+          lipo -archs "dist/dbOSK.app/Contents/MacOS/dbOSK"
+
+          ZIP="dbOSK-${VERSION}-macos-universal.zip"
+          DMG="dbOSK-${VERSION}-macos-universal.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "dist/dbOSK.app" "$ZIP"
+          mv "dist/dbOSK.dmg" "$DMG"
+          mkdir -p artifacts
+          mv "$ZIP" "$DMG" artifacts/
+          ( cd artifacts && for f in *.zip *.dmg; do shasum -a 256 "$f" > "$f.sha256"; done )
+          ls -la artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbOSK-macos-universal
+          path: artifacts/*
+          if-no-files-found: error
+
+  # Runs on Linux, only after the macOS build succeeds. A workflow_dispatch run without a
+  # tag stops after `build`, leaving the artifacts attached to the run for inspection.
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.event.inputs.tag, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dbOSK-macos-universal
+          path: artifacts
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: dbOSK ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: artifacts/*
+          body: |
+            Native macOS database client — **universal build (Apple Silicon + Intel)**.
+
+            **Unsigned** — there is no Apple Developer account, so this download is not
+            notarized. Install it as follows:
+
+            1. Download and unzip the `.zip` (or open the `.dmg`).
+            2. Move **dbOSK.app** to /Applications.
+            3. Clear the quarantine flag so Gatekeeper allows it to launch:
+               ```sh
+               xattr -dr com.apple.quarantine /Applications/dbOSK.app
+               ```
+
+            Requires macOS 14 (Sonoma) or newer. Verify a download with its `.sha256` file.
+            Prefer building from source? Use the Homebrew cask (see the README).

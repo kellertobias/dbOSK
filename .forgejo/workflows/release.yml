@@ -1,32 +1,42 @@
-name: release
+name: Release
 
-# Semantic-release style version bump. On every push to main we derive the
-# next version from the commit messages since the last tag (see
-# Scripts/bump-version.sh), write it to VERSION, then commit + tag + push.
+# Forgejo owns semantic versioning ONLY — it derives the next version from the
+# Conventional Commit messages on main and creates the v* git tag. It deliberately
+# does NOT build the app, so this pipeline needs no macOS runner and runs entirely on
+# a Linux runner.
 #
-# Loop prevention: the bump commit is "chore(release): ... [skip ci]" and the
-# job below is guarded to skip those, so the release push never triggers itself.
+# The tag is push-mirrored to GitHub, where the actual macOS build + release happens
+# (see .github/workflows/release.yml).
+#
+# Loop prevention: the release commit push does re-trigger this workflow once, but the
+# next version is computed from the range since the latest git tag (see
+# Scripts/bump-version.sh). The v* tag points at the release commit, so that re-run finds
+# zero commits since the tag and exits without releasing (a harmless no-op run).
+#
+# We deliberately do NOT add a "[skip ci]" marker to the release commit: the mirrored v*
+# tag points at that same commit, and GitHub Actions honors [skip ci] on a tag's commit —
+# which would silently skip the GitHub build and never publish the release.
 
 on:
   push:
     branches: [main]
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
-  version:
+  release:
     runs-on: ubuntu-latest
-    # Skip the workflow's own release commit (and any [skip ci] commit).
-    if: >-
-      ${{ !startsWith(github.event.head_commit.message, 'chore(release):')
-          && !contains(github.event.head_commit.message, '[skip ci]') }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v4
         with:
-          # Full history so `git describe --tags` and the commit-range scan work.
+          # Full history + tags so `git describe` and the commit-range scan work.
           fetch-depth: 0
-          # PAT with contents:write on this repo. Using a dedicated token (not
-          # the automatic one) ensures the push back to main is authenticated.
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # A token with contents:write is required to push the release commit and
+          # tag back to the protected main branch. Configure the SEMANTIC_RELEASE_TOKEN
+          # repository secret; the automatic token cannot push to a protected branch.
+          token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
 
       - name: Compute next version
         id: bump
@@ -37,15 +47,16 @@ jobs:
 
       - name: Commit, tag and push
         run: |
+          set -euo pipefail
           new="${{ steps.bump.outputs.version }}"
           if git diff --quiet -- VERSION; then
-            echo "VERSION unchanged; nothing to release."
+            echo "VERSION unchanged; no release-worthy commits since the last tag."
             exit 0
           fi
-          git config user.name  "forgejo-actions[bot]"
-          git config user.email "forgejo-actions@git.tokenet.de"
+          git config user.name  "Forgejo CI"
+          git config user.email "ci@tokenet.de"
           git add VERSION
-          git commit -m "chore(release): $new [skip ci]"
-          git tag "v$new"
+          git commit -m "chore(release): v$new"
+          git tag -a "v$new" -m "v$new"
           git push origin HEAD:main
           git push origin "v$new"

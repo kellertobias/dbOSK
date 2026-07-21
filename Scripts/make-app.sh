@@ -32,10 +32,17 @@ echo "==> Building release binary"
 # shellcheck disable=SC2086  # flags are intentionally word-split
 swift build -c release ${DBOSK_SWIFT_BUILD_FLAGS:-}
 
+# Resolve the products directory from SwiftPM rather than hardcoding .build/release,
+# so a universal build (DBOSK_SWIFT_BUILD_FLAGS="--arch arm64 --arch x86_64", whose
+# output lands in .build/apple/Products/Release) is picked up too. --show-bin-path
+# only prints the path; it does not rebuild.
+# shellcheck disable=SC2086
+BIN_DIR="$(swift build -c release ${DBOSK_SWIFT_BUILD_FLAGS:-} --show-bin-path)"
+
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp ".build/release/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
+cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

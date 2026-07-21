@@ -15,13 +15,28 @@ loading (1Password CLI, AWS, …).
 | ![Query results grid](docs/sql-table.png) Browse table data with filters and paging | ![SQL query editor](docs/sql-query.png) Write and save complex SQL, browse results inline |
 | ![MongoDB structure](docs/mongo-structure.png) Same structure view for MongoDB collections | ![MongoDB document viewer](docs/mongo-data.png) Browse documents as JSON or tree |
 
+## Download (prebuilt)
+
+Each tagged release publishes a prebuilt **universal** build (Apple Silicon +
+Intel) on the
+[GitHub Releases page](https://github.com/kellertobias/dbosk/releases/latest)
+(`.dmg` and a zipped `.app`, plus `.sha256` checksums). The build is **ad-hoc
+signed and not notarized** — there is no Apple Developer account — so on first
+launch clear the quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/dbOSK.app
+```
+
+Requires macOS 14 (Sonoma) or newer. If you prefer to build from source, use the
+Homebrew tap below.
+
 ## Install with Homebrew
 
-This repository is its own Homebrew tap. There is no prebuilt download or
-GitHub Release: the cask downloads the `main` branch source archive and
-compiles the app on your machine during install, then places `dbOSK.app`
-in `/Applications` automatically. You need Xcode 16+ and macOS 14 (Sonoma)
-or newer.
+This repository is its own Homebrew tap. The cask downloads the `main` branch
+source archive and compiles the app on your machine during install, then places
+`dbOSK.app` in `/Applications` automatically. You need Xcode 16+ and macOS 14
+(Sonoma) or newer.
 
 ```sh
 # 1. Tap this repository (registers it as a third-party tap):
@@ -116,6 +131,43 @@ xcrun stapler staple dist/dbOSK.dmg
 
 The app is intentionally **not sandboxed**: the script-based credential loader
 runs arbitrary user executables (e.g. `op`, `aws`) and reads their stdout.
+
+## Releases
+
+Releases are automated from **Conventional Commit** messages. Forgejo
+(`git.tokenet.de`, the source of truth) owns versioning; GitHub is a push mirror
+that owns the build.
+
+1. On every push to `main`, [`.forgejo/workflows/release.yml`](.forgejo/workflows/release.yml)
+   runs the version job on a **Linux** runner (no build, no macOS):
+   [`Scripts/bump-version.sh`](Scripts/bump-version.sh) derives the next version
+   from the commits since the last tag, writes it to the authoritative
+   [`VERSION`](VERSION) file, and commits + pushes a `vX.Y.Z` tag.
+2. That tag is push-mirrored to GitHub, where
+   [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the
+   **universal** (Apple Silicon + Intel) app on a macOS runner and, only if the
+   build succeeds, publishes a [GitHub Release](https://github.com/kellertobias/dbosk/releases)
+   with the `.dmg`/`.app` artifacts attached. The macOS SDK is required to
+   compile an AppKit app, so this is the one job that needs a macOS runner —
+   GitHub provides it as a managed VM.
+
+Version mapping (see the script for the exact rules):
+
+| Commit                                             | Bump  |
+|----------------------------------------------------|-------|
+| `fix: …`                                           | patch |
+| any other subject (`feat: …`, plain subject, …)    | minor |
+| `type!: …` or a `BREAKING CHANGE:` footer          | major |
+
+Preview the next version without changing anything:
+
+```sh
+Scripts/bump-version.sh --dry-run
+```
+
+The Forgejo release job needs a repository secret named **`SEMANTIC_RELEASE_TOKEN`**
+(a token with `contents: write`) to push the release commit and tag to the
+protected `main` branch. The GitHub workflow uses the built-in `GITHUB_TOKEN`.
 
 ## SSH tunnels
 
