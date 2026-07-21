@@ -17,8 +17,7 @@ loading (1Password CLI, AWS, …).
 
 ## Download (prebuilt)
 
-Each tagged release publishes a prebuilt **universal** build (Apple Silicon +
-Intel) on the
+Each tagged release publishes a prebuilt **Apple Silicon** build on the
 [GitHub Releases page](https://github.com/kellertobias/dbosk/releases/latest)
 (`.dmg` and a zipped `.app`, plus `.sha256` checksums). The build is **ad-hoc
 signed and not notarized** — there is no Apple Developer account — so on first
@@ -28,8 +27,8 @@ launch clear the quarantine flag:
 xattr -dr com.apple.quarantine /Applications/dbOSK.app
 ```
 
-Requires macOS 14 (Sonoma) or newer. If you prefer to build from source, use the
-Homebrew tap below.
+Requires macOS 14 (Sonoma) or newer on Apple Silicon. Intel Macs can build from
+source via the Homebrew tap below.
 
 ## Install with Homebrew
 
@@ -145,7 +144,7 @@ that owns the build.
    [`VERSION`](VERSION) file, and commits + pushes a `vX.Y.Z` tag.
 2. That tag is push-mirrored to GitHub, where
    [`.github/workflows/release.yml`](.github/workflows/release.yml) builds the
-   **universal** (Apple Silicon + Intel) app on a macOS runner and, only if the
+   **Apple Silicon** app on a macOS runner and, only if the
    build succeeds, publishes a [GitHub Release](https://github.com/kellertobias/dbosk/releases)
    with the `.dmg`/`.app` artifacts attached. The macOS SDK is required to
    compile an AppKit app, so this is the one job that needs a macOS runner —

@@ -7,9 +7,11 @@ name: Release
 #
 # dbOSK is an AppKit/SwiftUI app: it can only be compiled against the macOS SDK, so the
 # `build` job must run on a macOS runner (GitHub-hosted `macos-14`, a managed VM — no
-# self-hosted macOS runner needed). The build is UNIVERSAL (arm64 + x86_64), so the
-# release runs on both Apple Silicon and Intel Macs. It is ad-hoc signed only (no Apple
-# Developer account), so the binary is not notarized. The `publish` job runs on Linux.
+# self-hosted macOS runner needed). The build targets Apple Silicon (arm64) only: a
+# universal build needs `swift build --arch arm64 --arch x86_64`, which routes through
+# the Xcode build system and fails on this dependency graph under the CI Xcode. It is
+# ad-hoc signed only (no Apple Developer account), so the binary is not notarized. The
+# `publish` job runs on Linux.
 
 on:
   push:
@@ -31,8 +33,8 @@ concurrency:
 
 jobs:
   build:
-    name: Build universal macOS app
-    # macos-14 is a GitHub-hosted Apple Silicon runner; it cross-compiles the x86_64 slice.
+    name: Build macOS app (Apple Silicon)
+    # macos-14 is a GitHub-hosted Apple Silicon (arm64) runner.
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -51,13 +53,10 @@ jobs:
       - name: Swift toolchain
         run: swift --version
 
-      - name: Build and package the universal app (.app + .dmg)
+      - name: Build and package the app (.app + .dmg)
         id: build
         env:
           REF: ${{ github.event.inputs.tag || github.ref_name }}
-          # Universal binary: make-app.sh forwards these to `swift build` and resolves
-          # the products dir via `--show-bin-path`, so the fat binary is bundled.
-          DBOSK_SWIFT_BUILD_FLAGS: --arch arm64 --arch x86_64
         run: |
           set -euo pipefail
           # Pin the bundle version to the tag so filenames and CFBundleShortVersionString
@@ -68,13 +67,15 @@ jobs:
           esac
           export DBOSK_VERSION="$VERSION"
 
+          # Apple Silicon only: a plain `swift build` (no --arch) uses the native build
+          # system, avoiding the xcbuild multi-arch path that fails on this dep graph.
           Scripts/make-app.sh --dmg
 
-          echo "==> Verifying universal binary"
+          echo "==> Binary architecture"
           lipo -archs "dist/dbOSK.app/Contents/MacOS/dbOSK"
 
-          ZIP="dbOSK-${VERSION}-macos-universal.zip"
-          DMG="dbOSK-${VERSION}-macos-universal.dmg"
+          ZIP="dbOSK-${VERSION}-macos-arm64.zip"
+          DMG="dbOSK-${VERSION}-macos-arm64.dmg"
           ditto -c -k --sequesterRsrc --keepParent "dist/dbOSK.app" "$ZIP"
           mv "dist/dbOSK.dmg" "$DMG"
           mkdir -p artifacts
@@ -84,7 +85,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dbOSK-macos-universal
+          name: dbOSK-macos-arm64
           path: artifacts/*
           if-no-files-found: error
 
@@ -98,7 +99,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dbOSK-macos-universal
+          name: dbOSK-macos-arm64
           path: artifacts
 
       - name: Publish the GitHub Release
@@ -110,7 +111,7 @@ jobs:
           fail_on_unmatched_files: true
           files: artifacts/*
           body: |
-            Native macOS database client — **universal build (Apple Silicon + Intel)**.
+            Native macOS database client — **Apple Silicon (arm64)** build.
 
             **Unsigned** — there is no Apple Developer account, so this download is not
             notarized. Install it as follows:
@@ -122,5 +123,6 @@ jobs:
                xattr -dr com.apple.quarantine /Applications/dbOSK.app
                ```
 
-            Requires macOS 14 (Sonoma) or newer. Verify a download with its `.sha256` file.
+            Requires macOS 14 (Sonoma) or newer on Apple Silicon. Verify a download with
+            its `.sha256` file.
             Prefer building from source? Use the Homebrew cask (see the README).
