@@ -174,6 +174,7 @@ struct ConnectionEditView: View {
     let profile: ConnectionProfile?
 
     @State private var driverID = PostgresDriver.descriptor.id
+    @State private var connectionURL = ""
     @State private var name = ""
     @State private var groupName = ""
     @State private var labelID: UUID?
@@ -236,6 +237,12 @@ struct ConnectionEditView: View {
                 .font(.title2)
 
             Form {
+                TextField(
+                    "Connection URL", text: $connectionURL,
+                    prompt: Text("postgres://user:pass@host:5432/db"))
+                Text("Optional — pasting a connection string fills in the fields below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("Database", selection: $driverID) {
                     ForEach(AppModel.availableDrivers, id: \.id) { descriptor in
                         Text(descriptor.displayName).tag(descriptor.id)
@@ -427,6 +434,7 @@ struct ConnectionEditView: View {
         .padding(20)
         .frame(width: 420)
         .onAppear { populate() }
+        .onChange(of: connectionURL) { _, text in applyConnectionURL(text) }
         .sheet(isPresented: $showingMetabaseLogin) {
             if let url = metabaseBaseURL {
                 MetabaseLoginSheet(baseURL: url) { token in
@@ -508,6 +516,40 @@ struct ConnectionEditView: View {
         let port = AppModel.availableDrivers
             .first { $0.id == driverID }?.defaultPort
         return port.map(String.init) ?? ""
+    }
+
+    /// Fills the form from a pasted connection string. The URL is the source
+    /// of truth for the fields it can carry, so components it omits are
+    /// cleared rather than left over from an earlier paste; the name, group,
+    /// label, and tunnel are the user's and stay untouched (the name only gets
+    /// a suggestion while it is still empty).
+    private func applyConnectionURL(_ text: String) {
+        guard let parsed = ConnectionURL.parse(text) else { return }
+        if let id = parsed.driverID,
+            AppModel.availableDrivers.contains(where: { $0.id == id })
+        {
+            driverID = id
+        }
+        if let path = parsed.filePath {
+            filePath = path
+            if name.isEmpty {
+                name = URL(fileURLWithPath: path).deletingPathExtension()
+                    .lastPathComponent
+            }
+            return
+        }
+        host = parsed.host ?? ""
+        port = parsed.port.map(String.init) ?? ""
+        user = parsed.user ?? ""
+        database = parsed.database ?? ""
+        if let tls = parsed.tls { self.tls = tls }
+        if let password = parsed.password {
+            credentialMode = .password
+            self.password = password
+        } else if credentialMode == .password {
+            self.password = ""
+        }
+        if name.isEmpty { name = parsed.database ?? parsed.host ?? "" }
     }
 
     private func populate() {

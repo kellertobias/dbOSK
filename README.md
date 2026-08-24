@@ -168,6 +168,26 @@ The Forgejo release job needs a repository secret named **`SEMANTIC_RELEASE_TOKE
 (a token with `contents: write`) to push the release commit and tag to the
 protected `main` branch. The GitHub workflow uses the built-in `GITHUB_TOKEN`.
 
+## Connection URLs
+
+The connection editor has an optional **Connection URL** field: paste a
+connection string and the driver, host, port, user, password, database, and
+TLS mode below it fill themselves in. It understands the URL forms the engines'
+own tools print — with or without a `jdbc:` prefix — and libpq's keyword form:
+
+```
+postgres://me:secret@db.example.com:5432/app?sslmode=require
+mysql://me:secret@127.0.0.1:3306/shop
+mongodb+srv://me:secret@cluster.mongodb.net/app
+rediss://:token@cache.example.com:6380/2
+sqlite:///Users/me/app.sqlite
+https://metabase.example.com
+host=db.example.com port=5432 dbname=app user=me sslmode=require
+```
+
+The URL is only an input to the form — it is never stored. The password lands
+in the Keychain like any other, and the fields stay editable afterwards.
+
 ## SSH tunnels
 
 A connection can be routed through an SSH bastion (toggle in the connection
