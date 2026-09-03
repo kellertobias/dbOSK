@@ -46,6 +46,10 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
     public var port: Int?
     public var user: String?
     public var database: String?
+    /// Database the user's credentials live in when it is not `database`
+    /// (MongoDB `authSource`). Only meaningful for drivers whose descriptor
+    /// sets `supportsAuthenticationDatabase`.
+    public var authenticationDatabase: String?
     public var filePath: String?
     public var tls: ResolvedConnectionConfig.TLSMode
     public var credentialSource: CredentialSource
@@ -67,6 +71,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         port: Int? = nil,
         user: String? = nil,
         database: String? = nil,
+        authenticationDatabase: String? = nil,
         filePath: String? = nil,
         tls: ResolvedConnectionConfig.TLSMode = .preferred,
         credentialSource: CredentialSource = .none,
@@ -81,6 +86,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         self.port = port
         self.user = user
         self.database = database
+        self.authenticationDatabase = authenticationDatabase
         self.filePath = filePath
         self.tls = tls
         self.credentialSource = credentialSource
@@ -90,7 +96,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, groupName, labelID, driverID, host, port, user
-        case database, filePath, tls, credentialSource, sshTunnel
+        case database, authenticationDatabase, filePath, tls, credentialSource, sshTunnel
         case colorTag  // legacy: decode-only, migrated into a label on load
     }
 
@@ -105,6 +111,8 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         port = try c.decodeIfPresent(Int.self, forKey: .port)
         user = try c.decodeIfPresent(String.self, forKey: .user)
         database = try c.decodeIfPresent(String.self, forKey: .database)
+        authenticationDatabase = try c.decodeIfPresent(
+            String.self, forKey: .authenticationDatabase)
         filePath = try c.decodeIfPresent(String.self, forKey: .filePath)
         tls = try c.decode(ResolvedConnectionConfig.TLSMode.self, forKey: .tls)
         credentialSource = try c.decode(CredentialSource.self, forKey: .credentialSource)
@@ -123,6 +131,7 @@ public struct ConnectionProfile: Codable, Sendable, Hashable, Identifiable {
         try c.encodeIfPresent(port, forKey: .port)
         try c.encodeIfPresent(user, forKey: .user)
         try c.encodeIfPresent(database, forKey: .database)
+        try c.encodeIfPresent(authenticationDatabase, forKey: .authenticationDatabase)
         try c.encodeIfPresent(filePath, forKey: .filePath)
         try c.encode(tls, forKey: .tls)
         try c.encode(credentialSource, forKey: .credentialSource)

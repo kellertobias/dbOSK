@@ -182,6 +182,7 @@ struct ConnectionEditView: View {
     @State private var port = ""
     @State private var user = ""
     @State private var database = ""
+    @State private var authenticationDatabase = ""
     @State private var tls: ResolvedConnectionConfig.TLSMode = .preferred
     @State private var credentialMode: CredentialMode = .password
     @State private var password = ""
@@ -195,6 +196,7 @@ struct ConnectionEditView: View {
     @State private var awsKeyUser = ""
     @State private var awsKeyPassword = ""
     @State private var awsKeyDatabase = ""
+    @State private var awsKeyAuthenticationDatabase = ""
     @State private var awsFetchedKeys: [String] = []
     @State private var awsFetchStatus = ""
     @State private var awsFetchingKeys = false
@@ -216,6 +218,13 @@ struct ConnectionEditView: View {
     private var driverSupportsSSHTunnel: Bool {
         AppModel.availableDrivers
             .first { $0.id == driverID }?.supportsSSHTunnel ?? true
+    }
+
+    /// Whether the selected driver authenticates against a database separate
+    /// from the working one (MongoDB `authSource`).
+    private var driverSupportsAuthenticationDatabase: Bool {
+        AppModel.availableDrivers
+            .first { $0.id == driverID }?.supportsAuthenticationDatabase ?? false
     }
 
     /// The Metabase base URL, when the host field normalizes to one (a bare
@@ -323,6 +332,14 @@ struct ConnectionEditView: View {
                         .frame(maxWidth: 120)
                     TextField("User", text: $user)
                     TextField("Database", text: $database)
+                    if driverSupportsAuthenticationDatabase {
+                        TextField(
+                            "Auth Database", text: $authenticationDatabase,
+                            prompt: Text("admin"))
+                        Text("Database the user is defined in, if it differs from the one above.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Picker("TLS", selection: $tls) {
                         ForEach(ResolvedConnectionConfig.TLSMode.allCases, id: \.self) {
                             Text($0.displayName).tag($0)
@@ -385,6 +402,11 @@ struct ConnectionEditView: View {
                             awsKeyPicker("User key", selection: $awsKeyUser)
                             awsKeyPicker("Password key", selection: $awsKeyPassword)
                             awsKeyPicker("Database key", selection: $awsKeyDatabase)
+                            if driverSupportsAuthenticationDatabase {
+                                awsKeyPicker(
+                                    "Auth database key",
+                                    selection: $awsKeyAuthenticationDatabase)
+                            }
                         }
                         Text("""
                             Uses your AWS credentials from ~/.aws — SSO profiles \
@@ -477,8 +499,10 @@ struct ConnectionEditView: View {
     /// Fetched keys plus any saved selections, so pickers render a previously
     /// configured mapping even before the secret is re-fetched.
     private var awsKeyOptions: [String] {
-        let selected = [awsKeyHost, awsKeyPort, awsKeyUser, awsKeyPassword, awsKeyDatabase]
-            .filter { !$0.isEmpty }
+        let selected = [
+            awsKeyHost, awsKeyPort, awsKeyUser, awsKeyPassword, awsKeyDatabase,
+            awsKeyAuthenticationDatabase,
+        ].filter { !$0.isEmpty }
         return Array(Set(awsFetchedKeys + selected)).sorted()
     }
 
@@ -562,6 +586,7 @@ struct ConnectionEditView: View {
         port = profile.port.map(String.init) ?? ""
         user = profile.user ?? ""
         database = profile.database ?? ""
+        authenticationDatabase = profile.authenticationDatabase ?? ""
         filePath = profile.filePath ?? ""
         tls = profile.tls
         switch profile.credentialSource {
@@ -591,6 +616,7 @@ struct ConnectionEditView: View {
             awsKeyUser = config.keyMapping?.user ?? ""
             awsKeyPassword = config.keyMapping?.password ?? ""
             awsKeyDatabase = config.keyMapping?.database ?? ""
+            awsKeyAuthenticationDatabase = config.keyMapping?.authenticationDatabase ?? ""
         }
         if let tunnel = profile.sshTunnel {
             tunnelEnabled = true
@@ -618,7 +644,10 @@ struct ConnectionEditView: View {
                 port: awsKeyPort.isEmpty ? nil : awsKeyPort,
                 user: awsKeyUser.isEmpty ? nil : awsKeyUser,
                 password: awsKeyPassword.isEmpty ? nil : awsKeyPassword,
-                database: awsKeyDatabase.isEmpty ? nil : awsKeyDatabase)
+                database: awsKeyDatabase.isEmpty ? nil : awsKeyDatabase,
+                authenticationDatabase: !driverSupportsAuthenticationDatabase
+                    || awsKeyAuthenticationDatabase.isEmpty
+                    ? nil : awsKeyAuthenticationDatabase)
             source = .awsSecretsManager(
                 AWSSecretConfig(
                     profileName: awsProfile.isEmpty ? nil : awsProfile,
@@ -637,6 +666,9 @@ struct ConnectionEditView: View {
             port: isFileBased || isMetabase ? nil : Int(port),
             user: isFileBased || isMetabase || user.isEmpty ? nil : user,
             database: isFileBased || isMetabase || database.isEmpty ? nil : database,
+            authenticationDatabase: !driverSupportsAuthenticationDatabase
+                || authenticationDatabase.isEmpty
+                ? nil : authenticationDatabase,
             filePath: isFileBased && !filePath.isEmpty ? filePath : nil,
             tls: tls,
             credentialSource: source,

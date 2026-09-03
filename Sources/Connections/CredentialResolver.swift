@@ -24,6 +24,7 @@ public struct CredentialResolver: Sendable {
             port: profile.port,
             user: profile.user,
             database: profile.database,
+            authenticationDatabase: profile.authenticationDatabase,
             filePath: profile.filePath,
             tls: profile.tls
         )
@@ -40,6 +41,9 @@ public struct CredentialResolver: Sendable {
             if let user = credentials.user { config.user = user }
             if let password = credentials.password { config.password = password }
             if let database = credentials.database { config.database = database }
+            if let authenticationDatabase = credentials.authenticationDatabase {
+                config.authenticationDatabase = authenticationDatabase
+            }
             config.uri = credentials.uri
         case .awsSecretsManager(let awsConfig):
             let payload = try await awsSecretLoader.load(awsConfig)

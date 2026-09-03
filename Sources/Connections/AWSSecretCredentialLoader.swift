@@ -14,23 +14,27 @@ public struct AWSSecretKeyMapping: Codable, Sendable, Hashable {
     public var user: String?
     public var password: String?
     public var database: String?
+    public var authenticationDatabase: String?
 
     public init(
         host: String? = nil,
         port: String? = nil,
         user: String? = nil,
         password: String? = nil,
-        database: String? = nil
+        database: String? = nil,
+        authenticationDatabase: String? = nil
     ) {
         self.host = host
         self.port = port
         self.user = user
         self.password = password
         self.database = database
+        self.authenticationDatabase = authenticationDatabase
     }
 
     public var isEmpty: Bool {
         host == nil && port == nil && user == nil && password == nil && database == nil
+            && authenticationDatabase == nil
     }
 }
 
@@ -72,6 +76,7 @@ public struct AWSSecretPayload: Sendable, Equatable {
     public var user: String?
     public var password: String?
     public var database: String?
+    public var authenticationDatabase: String?
     public var uri: String?
     /// Top-level key names found in the secret's JSON (never values), or nil
     /// for a plain-string secret. Surfaced in connection errors so a
@@ -84,6 +89,7 @@ public struct AWSSecretPayload: Sendable, Equatable {
         user: String? = nil,
         password: String? = nil,
         database: String? = nil,
+        authenticationDatabase: String? = nil,
         uri: String? = nil,
         presentKeys: [String]? = nil
     ) {
@@ -92,6 +98,7 @@ public struct AWSSecretPayload: Sendable, Equatable {
         self.user = user
         self.password = password
         self.database = database
+        self.authenticationDatabase = authenticationDatabase
         self.uri = uri
         self.presentKeys = presentKeys
     }
@@ -115,6 +122,9 @@ public struct AWSSecretPayload: Sendable, Equatable {
         if config.port == nil, let port { config.port = port }
         if config.user == nil, let user { config.user = user }
         if config.database == nil, let database { config.database = database }
+        if config.authenticationDatabase == nil, let authenticationDatabase {
+            config.authenticationDatabase = authenticationDatabase
+        }
         if let password { config.password = password }
         if !profileHasHost, let uri { config.uri = uri }
         config.credentialDiagnostics = diagnosticsSummary
@@ -153,6 +163,9 @@ public struct AWSSecretPayload: Sendable, Equatable {
             user: string(mapping?.user, ["username", "user"]),
             password: string(mapping?.password, ["password"]),
             database: string(mapping?.database, ["dbname", "database"]),
+            authenticationDatabase: string(
+                mapping?.authenticationDatabase,
+                ["authenticationDatabase", "authSource", "authdb", "auth_database"]),
             uri: string(nil, ["uri", "url"]),
             presentKeys: object.keys.sorted()
         )

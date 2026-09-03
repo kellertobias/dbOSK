@@ -15,7 +15,8 @@ public final class MongoDriver: DatabaseDriver, Sendable {
         identifierQuote: "",
         // "analyze" maps to executionStats verbosity; find/aggregate/count
         // are read-only, so it is always safe to run.
-        explainSupport: .planAndAnalyze
+        explainSupport: .planAndAnalyze,
+        supportsAuthenticationDatabase: true
     )
 
     private let state: ConnectionActor
@@ -107,7 +108,10 @@ public final class MongoDriver: DatabaseDriver, Sendable {
         return try ExplainPlanParser.parseMongo(reply: reply, isAnalyze: analyze)
     }
 
-    private static func buildURI(_ config: ResolvedConnectionConfig) -> String {
+    /// Builds the connection URI from discrete fields. Credentials are
+    /// verified against `authenticationDatabase` ("admin" when unset), which
+    /// need not be the database the session opens on.
+    static func buildURI(_ config: ResolvedConnectionConfig) -> String {
         if let uri = config.uri { return uri }
         var components = URLComponents()
         components.scheme = "mongodb"
@@ -117,7 +121,10 @@ public final class MongoDriver: DatabaseDriver, Sendable {
         components.password = config.password
         components.path = "/" + (config.database ?? "admin")
         if config.user != nil {
-            components.queryItems = [URLQueryItem(name: "authSource", value: "admin")]
+            let authSource = config.authenticationDatabase.flatMap {
+                $0.isEmpty ? nil : $0
+            } ?? "admin"
+            components.queryItems = [URLQueryItem(name: "authSource", value: authSource)]
         }
         if config.tls == .required {
             var items = components.queryItems ?? []

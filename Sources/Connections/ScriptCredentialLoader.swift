@@ -3,13 +3,62 @@ import Foundation
 
 /// Output schema of a credential script. All keys optional; values are merged
 /// over the profile's fields. `uri` wins over everything when present.
+/// `authenticationDatabase` (alias `authSource`) is the MongoDB auth database.
 public struct ScriptCredentials: Codable, Sendable {
     public var host: String?
     public var port: Int?
     public var user: String?
     public var password: String?
     public var database: String?
+    public var authenticationDatabase: String?
     public var uri: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case host, port, user, password, database, authenticationDatabase, uri
+        case authSource  // decode-only alias for authenticationDatabase
+    }
+
+    public init(
+        host: String? = nil,
+        port: Int? = nil,
+        user: String? = nil,
+        password: String? = nil,
+        database: String? = nil,
+        authenticationDatabase: String? = nil,
+        uri: String? = nil
+    ) {
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.database = database
+        self.authenticationDatabase = authenticationDatabase
+        self.uri = uri
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        host = try c.decodeIfPresent(String.self, forKey: .host)
+        port = try c.decodeIfPresent(Int.self, forKey: .port)
+        user = try c.decodeIfPresent(String.self, forKey: .user)
+        password = try c.decodeIfPresent(String.self, forKey: .password)
+        database = try c.decodeIfPresent(String.self, forKey: .database)
+        authenticationDatabase =
+            try c.decodeIfPresent(String.self, forKey: .authenticationDatabase)
+            ?? c.decodeIfPresent(String.self, forKey: .authSource)
+        uri = try c.decodeIfPresent(String.self, forKey: .uri)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(host, forKey: .host)
+        try c.encodeIfPresent(port, forKey: .port)
+        try c.encodeIfPresent(user, forKey: .user)
+        try c.encodeIfPresent(password, forKey: .password)
+        try c.encodeIfPresent(database, forKey: .database)
+        try c.encodeIfPresent(authenticationDatabase, forKey: .authenticationDatabase)
+        try c.encodeIfPresent(uri, forKey: .uri)
+    }
 }
 
 public enum ScriptCredentialError: Error, CustomStringConvertible {

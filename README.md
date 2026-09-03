@@ -211,7 +211,22 @@ prints JSON to stdout:
 ```
 
 All keys are optional and merged over the profile's fields; `uri` wins when
-present. stderr is shown on failure; stdout is never logged or persisted.
+present. `authenticationDatabase` (alias `authSource`) sets the MongoDB auth
+database. stderr is shown on failure; stdout is never logged or persisted.
+
+## Authentication database
+
+MongoDB verifies credentials against the database the user was created in,
+which is often not the database you want to work in. The connection editor
+shows an **Auth Database** field for MongoDB (default `admin`) that is sent
+as `authSource`, while **Database** stays the working database. The value can
+also come from a credential script (`authenticationDatabase`/`authSource`) or
+an AWS secret (`authenticationDatabase`, `authSource`, `authdb`, or a mapped
+key).
+
+The other engines have no such parameter: PostgreSQL, MySQL/MariaDB, and
+Redis users are server-wide, and SQLite, DynamoDB, and Metabase do not
+authenticate with a database at all. The field is hidden for them.
 
 ## AWS Secrets Manager
 
@@ -232,7 +247,8 @@ Nothing from the secret is persisted locally:
 { "username": "…", "password": "…", "host": "…", "port": 5432, "dbname": "…" }
 ```
 
-`user`/`database`/`hostname`/`uri` aliases are accepted; a plain-string secret
+`user`/`database`/`hostname`/`uri` aliases are accepted (plus
+`authenticationDatabase`/`authSource`/`authdb` for MongoDB); a plain-string secret
 is treated as just the password. Secrets with non-standard key names can be
 mapped in the editor: "Fetch Keys" lists the secret's key names (values are
 never shown) and each field gets a dropdown to pick its key, with "Auto"

@@ -65,6 +65,12 @@ public struct DriverDescriptor: Sendable {
     /// drivers whose databases span multiple SQL dialects (Metabase), where
     /// only the driver knows the target engine's quoting and paging syntax.
     public let buildsTableBrowseInDriver: Bool
+    /// Whether the engine authenticates against a database other than the one
+    /// the session works in (MongoDB `authSource`). Engines whose users are
+    /// server-wide (PostgreSQL, MySQL, Redis) or that do not authenticate
+    /// with a database at all (SQLite, DynamoDB, Metabase) leave this false
+    /// and the editor hides the field.
+    public let supportsAuthenticationDatabase: Bool
 
     public init(
         id: String,
@@ -82,7 +88,8 @@ public struct DriverDescriptor: Sendable {
         supportsSSHTunnel: Bool = true,
         supportsDatabaseQualifiedSQL: Bool = true,
         rootNamespacesDefaultHidden: Bool = false,
-        buildsTableBrowseInDriver: Bool = false
+        buildsTableBrowseInDriver: Bool = false,
+        supportsAuthenticationDatabase: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -100,6 +107,7 @@ public struct DriverDescriptor: Sendable {
         self.supportsDatabaseQualifiedSQL = supportsDatabaseQualifiedSQL
         self.rootNamespacesDefaultHidden = rootNamespacesDefaultHidden
         self.buildsTableBrowseInDriver = buildsTableBrowseInDriver
+        self.supportsAuthenticationDatabase = supportsAuthenticationDatabase
     }
 
     /// Quotes an identifier for this driver's SQL dialect.
@@ -123,6 +131,10 @@ public struct ResolvedConnectionConfig: Sendable {
     public var user: String?
     public var password: String?
     public var database: String?
+    /// Database the credentials are verified against when it differs from
+    /// `database` (MongoDB `authSource`). Ignored by drivers whose descriptor
+    /// does not advertise `supportsAuthenticationDatabase`.
+    public var authenticationDatabase: String?
     /// Full connection URI; when present it wins over the discrete fields.
     public var uri: String?
     /// For file-based databases (SQLite).
@@ -142,6 +154,7 @@ public struct ResolvedConnectionConfig: Sendable {
         user: String? = nil,
         password: String? = nil,
         database: String? = nil,
+        authenticationDatabase: String? = nil,
         uri: String? = nil,
         filePath: String? = nil,
         tls: TLSMode = .preferred,
@@ -153,6 +166,7 @@ public struct ResolvedConnectionConfig: Sendable {
         self.user = user
         self.password = password
         self.database = database
+        self.authenticationDatabase = authenticationDatabase
         self.uri = uri
         self.filePath = filePath
         self.tls = tls
