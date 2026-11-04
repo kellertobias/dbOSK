@@ -10,19 +10,22 @@ import Testing
 @Suite struct MCPServerEndToEndTests {
 
     private func post(
-        _ body: [String: Any], port: Int, token: String? = nil
-    ) async throws -> (status: Int, json: [String: Any]?) {
+        _ body: [String: Any], port: Int, token: String? = nil, session: String? = nil
+    ) async throws -> (status: Int, json: [String: Any]?, session: String?) {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/mcp")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        if let session {
+            request.setValue(session, forHTTPHeaderField: "Mcp-Session-Id")
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as! HTTPURLResponse).statusCode
+        let http = response as! HTTPURLResponse
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return (status, json)
+        return (http.statusCode, json, http.value(forHTTPHeaderField: "Mcp-Session-Id"))
     }
 
     private func initializeBody(id: Int = 1) -> [String: Any] {
@@ -235,6 +238,56 @@ import Testing
             ]),
             port: port)
         #expect(toolResult(describe.json).isError)
+
+        await server.stop()
+    }
+
+    /// Reconnects and a second client each initialize again; one shared SDK
+    /// `Server` used to refuse that with "Server is already initialized".
+    @Test func everyInitializeOpensItsOwnSession() async throws {
+        let connection = exposed()
+        let server = DboskMCPServer(provider: StubProvider(items: [connection]))
+        let port = try await server.start(port: 0, token: nil)
+
+        let first = try await post(initializeBody(), port: port)
+        let second = try await post(initializeBody(), port: port)
+        #expect(first.status == 200)
+        #expect(second.status == 200)
+        #expect(second.json?["error"] == nil)
+        let firstSession = try #require(first.session)
+        let secondSession = try #require(second.session)
+        #expect(firstSession != secondSession)
+
+        // Both sessions serve tool calls, even with the same JSON-RPC id.
+        for session in [firstSession, secondSession] {
+            let response = try await post(
+                callBody(id: 2, tool: "list_connections", arguments: [:]),
+                port: port, session: session)
+            #expect(response.status == 200)
+            #expect(toolResult(response.json).text.contains(connection.id))
+        }
+
+        await server.stop()
+    }
+
+    @Test func unknownAndDeletedSessionsAnswer404() async throws {
+        let server = DboskMCPServer(provider: StubProvider(items: []))
+        let port = try await server.start(port: 0, token: nil)
+
+        let unknown = try await post(
+            ["jsonrpc": "2.0", "id": 1, "method": "tools/list"], port: port, session: "nope")
+        #expect(unknown.status == 404)
+
+        let session = try #require(try await post(initializeBody(), port: port).session)
+        var delete = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/mcp")!)
+        delete.httpMethod = "DELETE"
+        delete.setValue(session, forHTTPHeaderField: "Mcp-Session-Id")
+        let (_, deleteResponse) = try await URLSession.shared.data(for: delete)
+        #expect((deleteResponse as! HTTPURLResponse).statusCode == 200)
+
+        let afterDelete = try await post(
+            ["jsonrpc": "2.0", "id": 2, "method": "tools/list"], port: port, session: session)
+        #expect(afterDelete.status == 404)
 
         await server.stop()
     }
