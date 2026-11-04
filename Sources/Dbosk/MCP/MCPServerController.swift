@@ -34,7 +34,7 @@ final class MCPServerController {
     private(set) var installFeedback: InstallFeedback?
     /// Bumped when settings change so views re-render derived snippets.
     private(set) var accessMap: [UUID: MCPAccessConfig]
-    @ObservationIgnored private var feedbackDismissal: Task<Void, Never>?
+    @ObservationIgnored private var feedbackDismissal: DispatchWorkItem?
 
     private let accessStore = MCPAccessStore()
     private let keychain: KeychainStore
@@ -109,11 +109,17 @@ final class MCPServerController {
         installFeedback = InstallFeedback(text: text, isError: isError)
         feedbackDismissal?.cancel()
         let shown = installFeedback
-        feedbackDismissal = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(10))
-            guard !Task.isCancelled, let self, self.installFeedback == shown else { return }
-            self.installFeedback = nil
+        // A main-queue timer, not a sleeping `Task`: the release build aborted
+        // in `swift_task_dealloc` when that task finished (0.4.0 on macOS
+        // 27.0.1). No async task is involved here at all.
+        let dismissal = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.installFeedback == shown else { return }
+                self.installFeedback = nil
+            }
         }
+        feedbackDismissal = dismissal
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: dismissal)
     }
 
     // MARK: Access map
